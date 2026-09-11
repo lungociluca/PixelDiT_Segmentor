@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 from typing import Tuple
 
@@ -66,6 +67,13 @@ class MMDiTJointAttention(nn.Module):
         qy, ky, vy = qkv_y[0], qkv_y[1], qkv_y[2]
         qy = self.q_norm_y(qy)
         ky = self.k_norm_y(ky)
+        
+        # attn_mk = qx.permute(0,2,1,3) @ ky[:,3:10,:,:].permute(0,2,3,1)
+        # import os
+        # attn_mk = attn_mk.mean(1)[0,:,4].to(torch.float32).view(32,32).detach().cpu()
+        # plt.imshow(attn_mk, cmap="viridis")
+        # plt.savefig(f"trash/{len(os.listdir('trash'))}.png")
+        # plt.close()
 
         qx, kx = apply_rotary_emb(qx, kx, freqs_cis=pos_img)
         if pos_txt is not None:

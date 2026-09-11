@@ -1,8 +1,8 @@
 import torch
 
 from diffusion.model import gaussian_diffusion as gd
-from diffusion.model.dpm_solver import DPM_Solver, NoiseScheduleFlow, NoiseScheduleVP, model_wrapper
-
+from diffusion.model.dpm_solver import NoiseScheduleFlow, NoiseScheduleVP, model_wrapper
+from dpm_solver_wrapper import DPM_Solver_Wrapper
 
 def DPMS(
     model,
@@ -46,5 +46,5 @@ def DPMS(
     )
 
     # 3) Return solver
-    return DPM_Solver(model_fn, noise_schedule_obj, algorithm_type="dpmsolver++")
+    return DPM_Solver_Wrapper(model_fn, noise_schedule_obj, algorithm_type="dpmsolver++")
 

@@ -191,12 +191,12 @@ def get_args():
 @dataclass
 class PixelDiTInference(PixDiTConfig):
     config: Optional[str] = "configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml"
-    model_path: Optional[str] = None
+    model_path: Optional[str] = ".."
     work_dir: Optional[str] = None
     version: str = "sigma"
     txt_file: str = "asset/samples/samples_mini.txt"
     json_file: Optional[str] = None
-    sample_nums: int = 100_000
+    sample_nums: int = 1
     bs: int = 1
     cfg_scale: float = 3.5
     sampling_algo: str = "flow_dpm-solver"
