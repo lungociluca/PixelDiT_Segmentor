@@ -68,12 +68,7 @@ class MMDiTJointAttention(nn.Module):
         qy = self.q_norm_y(qy)
         ky = self.k_norm_y(ky)
         
-        # attn_mk = qx.permute(0,2,1,3) @ ky[:,3:10,:,:].permute(0,2,3,1)
-        # import os
-        # attn_mk = attn_mk.mean(1)[0,:,4].to(torch.float32).view(32,32).detach().cpu()
-        # plt.imshow(attn_mk, cmap="viridis")
-        # plt.savefig(f"trash/{len(os.listdir('trash'))}.png")
-        # plt.close()
+        attn_mk = qx.permute(0,2,1,3) @ ky[:,3:10,:,:].permute(0,2,3,1)
 
         qx, kx = apply_rotary_emb(qx, kx, freqs_cis=pos_img)
         if pos_txt is not None:
@@ -100,7 +95,7 @@ class MMDiTJointAttention(nn.Module):
 
         out_x = self.proj_drop_x(self.proj_x(out_x))
         out_y = self.proj_drop_y(self.proj_y(out_y))
-        return out_x, out_y
+        return out_x, out_y, attn_mk
 
 
 class MMDiTBlockT2I(nn.Module):
@@ -131,13 +126,13 @@ class MMDiTBlockT2I(nn.Module):
 
         x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
         y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
-        attn_x, attn_y = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask)
+        attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask)
         x = x + gate_msa_x * attn_x
         y = y + gate_msa_y * attn_y
 
         x = x + gate_mlp_x * self.mlp_x(apply_adaln(self.norm_x2(x), shift_mlp_x, scale_mlp_x))
         y = y + gate_mlp_y * self.mlp_y(apply_adaln(self.norm_y2(y), shift_mlp_y, scale_mlp_y))
-        return x, y
+        return x, y, attn_mk
 
 
 class PixDiT_T2I(nn.Module):
@@ -294,9 +289,16 @@ class PixDiT_T2I(nn.Module):
             self.last_repa_tokens = None
             s = s0
             for i in range(self.patch_depth):
-                s, y_emb = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint)
+                s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint)
                 if 0 < self.repa_encoder_index == (i + 1):
                     self.last_repa_tokens = s
+                
+                import os
+                attn_mk = attn_mk.to(torch.float32).mean(1)[0,:,0].view(Hs, Ws).detach().cpu()
+                plt.imshow(attn_mk, cmap="viridis")
+                plt.savefig(f"trash/{len(os.listdir('trash'))}.png")
+                plt.close()
+
             s = torch.nn.functional.silu(t_emb + s)
         if not (0 < self.repa_encoder_index <= self.patch_depth):
             self.last_repa_tokens = s

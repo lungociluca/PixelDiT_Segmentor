@@ -145,21 +145,22 @@ class DPM_Solver_Wrapper(DPM_Solver):
 
 
 
-    # def sample(
-    #     self,
-    #     x,
-    #     steps=20,
-    #     t_start=None,
-    #     t_end=None,
-    #     order=2,
-    #     skip_type="time_uniform",
-    #     method="multistep",
-    #     lower_order_final=True,
-    #     denoise_to_zero=False,
-    #     solver_type="dpmsolver",
-    #     atol=0.0078,
-    #     rtol=0.05,
-    #     return_intermediate=False,
-    #     flow_shift=1.0,
-    # ):
-    #     return self.model_fn(x, t) 
+    def sample(
+        self,
+        x,
+        steps=20,
+        t_start=None,
+        t_end=None,
+        order=2,
+        skip_type="time_uniform",
+        method="multistep",
+        lower_order_final=True,
+        denoise_to_zero=False,
+        solver_type="dpmsolver",
+        atol=0.0078,
+        rtol=0.05,
+        return_intermediate=False,
+        flow_shift=1.0,
+    ):
+        t = torch.tensor(0.035, device="cuda")
+        return self.model_fn(x, t) 

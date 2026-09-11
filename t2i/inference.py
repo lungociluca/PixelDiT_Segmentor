@@ -11,11 +11,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+import numpy as np
 import pyrallis
 import torch
 from termcolor import colored
 from torchvision.utils import save_image
 from tqdm import tqdm
+import PIL.Image
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -164,6 +166,17 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
                 schedule="FLOW",
                 interval_guidance=args.interval_guidance,
             )
+            pic_name = "2007_000033"
+            rbg = PIL.Image.open(f"../../datasets/VOCdevkit/VOC2012/JPEGImages/{pic_name}.jpg").convert("RGB")
+            z = torch.from_numpy(np.array(rbg)).to("cuda").permute(2, 0, 1).float() / 255
+            z = (z * 2) - 1
+            z = torch.nn.functional.interpolate(
+                z.unsqueeze(0),
+                size=(512, 512),
+                mode="bilinear",
+                align_corners=False
+            )
+
             samples = dpm_solver.sample(
                 z,
                 steps=sample_steps,
