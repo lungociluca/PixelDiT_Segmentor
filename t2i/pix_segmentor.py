@@ -22,6 +22,9 @@ from diffusion.model.utils import get_weight_dtype, prepare_prompt_ar
 from diffusion.utils.config import PixDiTConfig, model_init_config
 from diffusion.utils.logger import get_root_logger
 
+from diffusion import DPMS
+
+
 @dataclass
 class PixelDiTInference(PixDiTConfig):
     config: Optional[str] = "configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml"
@@ -110,17 +113,18 @@ def get_model():
     logger.info(
         f"{model.__class__.__name__}:{config.model.model}, Model Parameters: {sum(p.numel() for p in model.parameters()):,}"
     )
-    return model
+    return model, tokenizer, text_encoder
 
 class Pix_Segmentor(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.model = get_model()
+        self.model, self.tokenizer, self.text_encoder = get_model()
         with open("prompts/prompts.json") as f:
             self.prompts_dict = json.load(f)
         with open(local_config.ds_config_path) as f:
             self.labels = json.load(f)
+
 
     @staticmethod
     def img_id_from_path(x):
@@ -138,14 +142,71 @@ class Pix_Segmentor(torch.nn.Module):
         mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
         return mask_tensor
 
+    def embed_condition(self, prompts):
+        caption_token = self.tokenizer(
+            prompts, max_length=300, padding="max_length", truncation=True, return_tensors="pt"
+        ).to(local_config.device)
+        select_index = [0] + list(range(-300 + 1, 0))
+        caption_embs = self.text_encoder(caption_token.input_ids, caption_token.attention_mask)[0][:, None][
+            :, :, select_index
+        ]
+        emb_masks = caption_token.attention_mask[:, select_index]
+        return caption_embs, emb_masks
+
+    def run_diffusion_model(self, image, prompts):
+        emb, emb_mask = self.embed_condition(prompts)
+        model_kwargs = dict(data_info={"img_hw": image.shape[-2], "aspect_ratio": 1}, mask=emb_mask)
+
+        dpm_solver = DPMS(
+            self.model.forward_with_dpmsolver,
+            condition=emb,
+            uncondition=None,
+            model_type="flow",
+            model_kwargs=model_kwargs,
+            schedule="FLOW",
+            cfg_scale=3.5
+        )
+
+        del self.tokenizer
+        del self.text_encoder
+
+        print("Z", image.min(), image.max(), image.mean(), image.std())
+        image = torch.nn.functional.interpolate(
+            image[None,:,:,:],
+            size=(512, 512),
+            mode="bilinear",
+            align_corners=False
+        )
+        print("Z", image.min(), image.max(), image.mean(), image.std())
+        samples = dpm_solver.sample(
+            image,
+            steps=50,
+            order=2,
+            skip_type="time_uniform_flow",
+            method="multistep",
+        )
+
+        os.umask(0o000)
+        for i, sample in enumerate(samples):
+            save_path = os.path.join("trash", "file_9.jpg")
+            from torchvision.utils import save_image
+            save_image(sample, save_path, nrow=1, normalize=True, value_range=(-1, 1))
+
     @torch.no_grad()
     def forward_no_grad(self, x):
-        image_tensor = x[0]["image"]
+        # image_tensor = x[0]["image"].float().to(local_config.device) / 255.
+        # image_tensor = (image_tensor * 2) - 1
+        import PIL.Image
+        image_tensor = PIL.Image.open(f"{x[0]['file_name']}").convert("RGB")
+        image_tensor = torch.from_numpy(np.array(image_tensor)).to("cuda").permute(2, 0, 1).float() / 255
+        image_tensor = (image_tensor * 2) - 1
+
         gt = self.get_gt(x)
         h, w = gt.shape[-2:]
         file_id = Pix_Segmentor.img_id_from_path(x)
         prompts = self.prompts_dict[file_id]
 
+        self.run_diffusion_model(image_tensor, prompts)
         prediction = torch.zeros((len(prompts), image_tensor.shape[-2],image_tensor.shape[-1]))#.to(local_config.device)
         prediction[:, 10:30, -50:] += 1.
         prediction = Pix_Segmentor.resize_maps(prediction, (h,w))

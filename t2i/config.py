@@ -32,4 +32,4 @@ image_size = 512
 
 prompt_format = "{target}"
 idx_token_of_interest = 0
-eval_samples_limit = 30
+eval_samples_limit = 1

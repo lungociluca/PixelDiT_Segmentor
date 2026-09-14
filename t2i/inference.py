@@ -86,7 +86,10 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
         )
         if bs == 1:
             prompt = data_dict[chunk[0]]["prompt"] if dict_prompt else chunk[0]
+            print("PROMPT", prompt)
+            print("COND", "true" if dict_prompt else "false")
             prompt_clean, _, hw, ar, custom_hw = prepare_prompt_ar(prompt, base_ratios, device=device, show=False)
+            print("PROMPT CLEAN", prompt_clean)
             # Override with CLI-provided custom size if specified
             if args.custom_height is not None and args.custom_width is not None:
                 hw = torch.tensor(
@@ -170,13 +173,14 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
             rbg = PIL.Image.open(f"../../datasets/VOCdevkit/VOC2012/JPEGImages/{pic_name}.jpg").convert("RGB")
             z = torch.from_numpy(np.array(rbg)).to("cuda").permute(2, 0, 1).float() / 255
             z = (z * 2) - 1
+            print("Z", z.min(), z.max(), z.mean(), z.std())
             z = torch.nn.functional.interpolate(
                 z.unsqueeze(0),
                 size=(512, 512),
                 mode="bilinear",
                 align_corners=False
             )
-
+            print("Z", z.min(), z.max(), z.mean(), z.std())
             samples = dpm_solver.sample(
                 z,
                 steps=sample_steps,
@@ -189,7 +193,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
         torch.cuda.empty_cache()
 
         os.umask(0o000)
-        for i, sample in enumerate(samples):
+        for i, sample in enumerate(z):
             save_file_name = f"{chunk[i]}.jpg" if dict_prompt else f"{prompts[i][:100]}.jpg"
             save_path = os.path.join(save_root, save_file_name)
             save_image(sample, save_path, nrow=1, normalize=True, value_range=(-1, 1))

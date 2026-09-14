@@ -68,8 +68,8 @@ class MMDiTJointAttention(nn.Module):
         qy = self.q_norm_y(qy)
         ky = self.k_norm_y(ky)
         
-        attn_mk = qx.permute(0,2,1,3) @ ky[:,3:10,:,:].permute(0,2,3,1)
-
+        attn_mk = (qx.permute(0,2,1,3) @ ky[:,3:10,:,:].permute(0,2,3,1).detach()).cpu()
+        print("qx", qx.permute(0,2,1,3).shape, "ky", ky[:,3:10,:,:].shape, "atnn", attn_mk.shape)
         qx, kx = apply_rotary_emb(qx, kx, freqs_cis=pos_img)
         if pos_txt is not None:
             qy, ky = apply_rotary_emb(qy, ky, freqs_cis=pos_txt)
@@ -294,7 +294,9 @@ class PixDiT_T2I(nn.Module):
                     self.last_repa_tokens = s
                 
                 import os
-                attn_mk = attn_mk.to(torch.float32).mean(1)[0,:,0].view(Hs, Ws).detach().cpu()
+                print("attn_mk", attn_mk.shape)
+                print("attn mk after", attn_mk.to(torch.float32).mean(1).shape)
+                attn_mk = attn_mk.to(torch.float32).mean(1)[-1,:,0].view(Hs, Ws).detach().cpu()
                 plt.imshow(attn_mk, cmap="viridis")
                 plt.savefig(f"trash/{len(os.listdir('trash'))}.png")
                 plt.close()
