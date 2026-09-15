@@ -5,5 +5,7 @@ t2i/output/*
 t2i/prompts/prompts.json
 t2i/sio_maps/*
 prompts.txt
-t2i/detectrion2/*
-t2i/detectrion_2/*
+t2i/detectron2/*
+t2i/detectron_2/*
+notes.txt
+t2i/prompts.txt

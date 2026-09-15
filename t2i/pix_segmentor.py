@@ -113,7 +113,12 @@ def get_model():
     logger.info(
         f"{model.__class__.__name__}:{config.model.model}, Model Parameters: {sum(p.numel() for p in model.parameters()):,}"
     )
-    return model, tokenizer, text_encoder
+    state_dict = torch.load("pixeldit_t2i_v1.pth", map_location=lambda storage, loc: storage)
+    if "pos_embed" in state_dict["state_dict"]:
+        del state_dict["state_dict"]["pos_embed"]
+
+    missing, unexpected = model.load_state_dict(state_dict["state_dict"], strict=False)
+    return model.eval().to(torch.bfloat16), tokenizer, text_encoder
 
 class Pix_Segmentor(torch.nn.Module):
 
@@ -144,7 +149,7 @@ class Pix_Segmentor(torch.nn.Module):
 
     def embed_condition(self, prompts):
         caption_token = self.tokenizer(
-            prompts, max_length=300, padding="max_length", truncation=True, return_tensors="pt"
+            prompts, max_length=506, padding="max_length", truncation=True, return_tensors="pt"
         ).to(local_config.device)
         select_index = [0] + list(range(-300 + 1, 0))
         caption_embs = self.text_encoder(caption_token.input_ids, caption_token.attention_mask)[0][:, None][
@@ -198,13 +203,13 @@ class Pix_Segmentor(torch.nn.Module):
         # image_tensor = (image_tensor * 2) - 1
         import PIL.Image
         image_tensor = PIL.Image.open(f"{x[0]['file_name']}").convert("RGB")
-        image_tensor = torch.from_numpy(np.array(image_tensor)).to("cuda").permute(2, 0, 1).float() / 255
+        image_tensor = torch.from_numpy(np.array(image_tensor)).to(torch.bfloat16).to(local_config.device).permute(2, 0, 1) / 255
         image_tensor = (image_tensor * 2) - 1
 
         gt = self.get_gt(x)
         h, w = gt.shape[-2:]
         file_id = Pix_Segmentor.img_id_from_path(x)
-        prompts = self.prompts_dict[file_id]
+        prompts = [local_config.prompt_format.format(target=current_target) for current_target in self.prompts_dict[file_id]]
 
         self.run_diffusion_model(image_tensor, prompts)
         prediction = torch.zeros((len(prompts), image_tensor.shape[-2],image_tensor.shape[-1]))#.to(local_config.device)
@@ -213,11 +218,11 @@ class Pix_Segmentor(torch.nn.Module):
         predictions_all = torch.zeros((len(self.labels)+1), h, w)
 
         cam_dict = {}
-        for i, current_label in enumerate(prompts):
+        for i, current_label in enumerate(self.prompts_dict[file_id]):
             label_idx = self.labels.index(current_label) + 1
             predictions_all[label_idx] += prediction[i]
 
-            cam_dict[str(label_idx-1)] = (prediction[i] * 255).cpu().numpy()
+            cam_dict[str(label_idx-1)] = (prediction[i].to(torch.float32) * 255).cpu().numpy()
 
         save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
         sio.savemat(save_path, cam_dict, do_compression=True)

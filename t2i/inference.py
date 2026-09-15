@@ -193,7 +193,7 @@ def visualize(config, args, model, items, bs, sample_steps, cfg_scale):
         torch.cuda.empty_cache()
 
         os.umask(0o000)
-        for i, sample in enumerate(z):
+        for i, sample in enumerate(samples):
             save_file_name = f"{chunk[i]}.jpg" if dict_prompt else f"{prompts[i][:100]}.jpg"
             save_path = os.path.join(save_root, save_file_name)
             save_image(sample, save_path, nrow=1, normalize=True, value_range=(-1, 1))
