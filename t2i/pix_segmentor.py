@@ -158,7 +158,7 @@ class Pix_Segmentor(torch.nn.Module):
         emb_masks = caption_token.attention_mask[:, select_index]
         return caption_embs, emb_masks
 
-    def run_diffusion_model(self, image, prompts):
+    def run_diffusion_model(self, image, prompts, segment_data):
         emb, emb_mask = self.embed_condition(prompts)
         model_kwargs = dict(data_info={"img_hw": image.shape[-2], "aspect_ratio": 1}, mask=emb_mask)
 
@@ -172,23 +172,18 @@ class Pix_Segmentor(torch.nn.Module):
             cfg_scale=3.5
         )
 
-        del self.tokenizer
-        del self.text_encoder
+        # del self.tokenizer
+        # del self.text_encoder
 
-        print("Z", image.min(), image.max(), image.mean(), image.std())
         image = torch.nn.functional.interpolate(
             image[None,:,:,:],
             size=(512, 512),
             mode="bilinear",
             align_corners=False
         )
-        print("Z", image.min(), image.max(), image.mean(), image.std())
-        samples = dpm_solver.sample(
-            image,
-            steps=50,
-            order=2,
-            skip_type="time_uniform_flow",
-            method="multistep",
+        samples = dpm_solver.segment(
+            image.repeat(len(prompts),1,1,1),
+            segment_data
         )
 
         os.umask(0o000)
@@ -201,6 +196,7 @@ class Pix_Segmentor(torch.nn.Module):
     def forward_no_grad(self, x):
         # image_tensor = x[0]["image"].float().to(local_config.device) / 255.
         # image_tensor = (image_tensor * 2) - 1
+        # TODO: figure out how to use the providex tensor, get rid of reading from disk
         import PIL.Image
         image_tensor = PIL.Image.open(f"{x[0]['file_name']}").convert("RGB")
         image_tensor = torch.from_numpy(np.array(image_tensor)).to(torch.bfloat16).to(local_config.device).permute(2, 0, 1) / 255
@@ -211,18 +207,23 @@ class Pix_Segmentor(torch.nn.Module):
         file_id = Pix_Segmentor.img_id_from_path(x)
         prompts = [local_config.prompt_format.format(target=current_target) for current_target in self.prompts_dict[file_id]]
 
-        self.run_diffusion_model(image_tensor, prompts)
-        prediction = torch.zeros((len(prompts), image_tensor.shape[-2],image_tensor.shape[-1]))#.to(local_config.device)
-        prediction[:, 10:30, -50:] += 1.
+        segment_data = {}
+        self.run_diffusion_model(image_tensor, prompts, segment_data)
+        assert segment_data["mask"][local_config.target_layer].shape[0] == len(prompts)
+        prediction = segment_data["mask"][local_config.target_layer]
+        print('prediciton', prediction.shape)
+
         prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
         predictions_all = torch.zeros((len(self.labels)+1), h, w)
 
         cam_dict = {}
+        min_max_norm = lambda x: (x - x.min()) / (x.max() - x.min())
         for i, current_label in enumerate(self.prompts_dict[file_id]):
             label_idx = self.labels.index(current_label) + 1
-            predictions_all[label_idx] += prediction[i]
+            predictions_all[label_idx-1] += prediction[i]
 
-            cam_dict[str(label_idx-1)] = (prediction[i].to(torch.float32) * 255).cpu().numpy()
+            current_pred = min_max_norm(prediction[i].to(torch.float32))
+            cam_dict[str(label_idx-1)] = (current_pred * 255).cpu().numpy()
 
         save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
         sio.savemat(save_path, cam_dict, do_compression=True)

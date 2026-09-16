@@ -1,4 +1,6 @@
 rm -r vis;
+rm sio_maps/images/*;
+rm sio_maps/samples/*;
 rm trash/*;
 # python inference.py \
 #   --config configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml \

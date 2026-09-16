@@ -269,6 +269,7 @@ def model_wrapper(
     interval_guidance=[0, 1.0],
     classifier_fn=None,
     classifier_kwargs={},
+    segment_data=None
 ):
     """Create a wrapper function for the noise prediction model.
 
@@ -372,12 +373,12 @@ def model_wrapper(
         else:
             return t_continuous
 
-    def noise_pred_fn(x, t_continuous, cond=None):
+    def noise_pred_fn(x, t_continuous, cond=None, segment_data=segment_data):
         t_input = get_model_input_time(t_continuous)
         if cond is None:
-            output = model(x, t_input, **model_kwargs)
+            output = model(x, t_input, segment_data=segment_data, **model_kwargs)
         else:
-            output = model(x, t_input, cond, **model_kwargs)
+            output = model(x, t_input, cond, segment_data=segment_data, **model_kwargs)
         if model_type == "noise":
             return output
         elif model_type == "x_start":
@@ -406,7 +407,7 @@ def model_wrapper(
             log_prob = classifier_fn(x_in, t_input, condition, **classifier_kwargs)
             return torch.autograd.grad(log_prob.sum(), x_in)[0]
 
-    def model_fn(x, t_continuous):
+    def model_fn(x, t_continuous, segment_data=None):
         """
         The noise predicition model function that is used for DPM-Solver.
         """
@@ -426,15 +427,15 @@ def model_wrapper(
                 or unconditional_condition is None
                 or not (interval_guidance[0] < t_continuous[0] < interval_guidance[1])
             ):
-                return noise_pred_fn(x, t_continuous, cond=condition)
+                return noise_pred_fn(x, t_continuous, cond=condition, segment_data=segment_data)
             else:
                 x_in = torch.cat([x] * 2)
                 t_in = torch.cat([t_continuous] * 2)
                 c_in = torch.cat([unconditional_condition, condition])
                 try:
-                    noise_uncond, noise = noise_pred_fn(x_in, t_in, cond=c_in).chunk(2)
+                    noise_uncond, noise = noise_pred_fn(x_in, t_in, cond=c_in, segment_data=segment_data).chunk(2)
                 except:
-                    noise_uncond, noise = noise_pred_fn(x_in, t_in, cond=c_in)[0].chunk(2)
+                    noise_uncond, noise = noise_pred_fn(x_in, t_in, cond=c_in, segment_data=segment_data)[0].chunk(2)
                 return noise_uncond + guidance_scale * (noise - noise_uncond)
 
     assert model_type in ["noise", "x_start", "v", "score", "flow"]
@@ -513,7 +514,7 @@ class DPM_Solver:
             Burcu Karagol Ayan, S Sara Mahdavi, Rapha Gontijo Lopes, et al. Photorealistic text-to-image diffusion models
             with deep language understanding. arXiv preprint arXiv:2205.11487, 2022b.
         """
-        self.model = lambda x, t: model_fn(x, t.expand(x.shape[0]))
+        self.model = lambda x, t, segment_data: model_fn(x, t.expand(x.shape[0]), segment_data=segment_data)
         self.noise_schedule = noise_schedule
         assert algorithm_type in ["dpmsolver", "dpmsolver++"]
         self.algorithm_type = algorithm_type
@@ -568,7 +569,7 @@ class DPM_Solver:
         """
         Return the noise prediction model.
         """
-        return self.model(x, t)
+        return self.model(x, t, None)
 
     def data_prediction_fn(self, x, t):
         """

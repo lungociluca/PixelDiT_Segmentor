@@ -171,7 +171,7 @@ def save_sample_segmentations(args):
         saved_dict = sio.loadmat(mask_path)
         for class_id in list(saved_dict.keys())[3:]:
             mask_tensor = torch.Tensor(saved_dict[class_id] / 255)
-            save_segmentation(orig_image, mask_tensor, mask_id + str(class_id), args)
+            save_segmentation(orig_image, mask_tensor, mask_id + embs[int(class_id)], args)
 
 
 
@@ -179,7 +179,7 @@ class Args:
     val_split = 1.
     comment='train1464'
     curve=True
-    end=51
+    end=30
     base_dir = 'sio_maps'
     image_dir = os.path.join(base_dir,'images')
     cam_npy_dir = os.path.join(base_dir, 'images')
@@ -188,7 +188,7 @@ class Args:
     # list='/root/autodl-tmp/wjl/ptp_diffusion/voc12/train_aug_id.txt'
     logfile=os.path.join(base_dir,'eval.txt')
     num_classes=21
-    start=50
+    start=0
     t=None
     type='npy'
     sample_images=True

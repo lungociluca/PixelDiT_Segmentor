@@ -26,3 +26,11 @@ class DPM_Solver_Wrapper(DPM_Solver):
     ):
         t = torch.tensor(local_config.timestep, device=local_config.device, dtype=torch.bfloat16)
         return self.model_fn(x, t) 
+
+    def segment(
+        self,
+        x,
+        segment_data
+    ):
+        t = torch.tensor(local_config.timestep, device=local_config.device, dtype=torch.bfloat16)
+        return self.model(x, t, segment_data=segment_data) 

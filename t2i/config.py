@@ -4,6 +4,10 @@ class EvalDataset(Enum):
     VOC12 = "voc_2012_test_sem_seg"
     ADE20 = "ade20k_sem_seg_val"
 
+class SegmentDataKeys(Enum):
+    MASK = "mask"
+    
+
 ds_config_dict = {
     EvalDataset.VOC12: "catseg_configs/voc20.json",
     EvalDataset.ADE20: "catseg_configs/ade150.json"
@@ -31,6 +35,8 @@ current_ds_paths = dataset_paths[eval_dataset]
 ds_config_path = current_ds_paths["json"]
 image_size = 512
 
-idx_token_of_interest = 0
-eval_samples_limit = 1
+idx_token_of_interest = 207
+eval_samples_limit = 10
+target_layer = 0
+layer_count = 1
 timestep = 0.002

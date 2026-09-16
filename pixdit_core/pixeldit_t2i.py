@@ -16,6 +16,7 @@ from .modules import (
     precompute_freqs_cis_2d,
 )
 
+import config as local_config
 
 class MMDiTJointAttention(nn.Module):
     def __init__(
@@ -68,8 +69,8 @@ class MMDiTJointAttention(nn.Module):
         qy = self.q_norm_y(qy)
         ky = self.k_norm_y(ky)
         
-        attn_mk = (qx.permute(0,2,1,3) @ ky[:,3:10,:,:].permute(0,2,3,1).detach()).cpu()
-        print("qx", qx.permute(0,2,1,3).shape, "ky", ky[:,3:10,:,:].shape, "atnn", attn_mk.shape)
+        my_norm = lambda x: x
+        attn_mk = (my_norm(qx.permute(0,2,1,3)) @ ky[:,[local_config.idx_token_of_interest],:,:].permute(0,2,3,1).detach()).cpu()
         qx, kx = apply_rotary_emb(qx, kx, freqs_cis=pos_img)
         if pos_txt is not None:
             qy, ky = apply_rotary_emb(qy, ky, freqs_cis=pos_txt)
@@ -252,7 +253,7 @@ class PixDiT_T2I(nn.Module):
         nn.init.zeros_(self.final_layer.linear.weight)
         nn.init.zeros_(self.final_layer.linear.bias)
 
-    def forward(self, x, t, y, s=None, mask=None):
+    def forward(self, x, t, y, s=None, mask=None, segment_data=None):
         B, _, H, W = x.shape
         Hs = H // self.patch_size
         Ws = W // self.patch_size
@@ -271,7 +272,8 @@ class PixDiT_T2I(nn.Module):
         y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
 
         condition = torch.nn.functional.silu(t_emb)
-
+        if segment_data is not None:
+            segment_data["mask"] = {}
         if s is None:
             s0 = self.s_embedder(x_patches)
             pos_txt = self.fetch_pos_text(Ltxt, x.device) if self.use_text_rope else None
@@ -293,13 +295,16 @@ class PixDiT_T2I(nn.Module):
                 if 0 < self.repa_encoder_index == (i + 1):
                     self.last_repa_tokens = s
                 
-                import os
-                print("attn_mk", attn_mk.shape)
-                print("attn mk after", attn_mk.to(torch.float32).mean(1).shape)
-                attn_mk = attn_mk.to(torch.float32).mean(1)[-1,:,0].view(Hs, Ws).detach().cpu()
-                plt.imshow(attn_mk, cmap="viridis")
-                plt.savefig(f"trash/{len(os.listdir('trash'))}.png")
-                plt.close()
+                # import os
+                # attn_mk_disp = attn_mk.to(torch.float32).mean(1)[-1,:,0].view(Hs, Ws).detach().cpu()
+                # plt.imshow(attn_mk_disp, cmap="viridis")
+                # plt.savefig(f"trash/{i}_{len(os.listdir('trash'))}.png")
+                # plt.close()
+
+                if segment_data is not None:
+                    if i == local_config.layer_count - 1:
+                        segment_data["mask"][i] = attn_mk.mean(1).view(B, Hs, Ws).squeeze(-1)
+                        break
 
             s = torch.nn.functional.silu(t_emb + s)
         if not (0 < self.repa_encoder_index <= self.patch_depth):
