@@ -219,7 +219,7 @@ class Pix_Segmentor(torch.nn.Module):
             target_labels = self.add_extra_labels(target_labels)
         prompts = [local_config.prompt_format.format(target=current_target) for current_target in target_labels]
 
-        segment_data = {"labels": target_labels, "img_id": file_id}
+        segment_data = {"labels": target_labels, "img_id": file_id, "gt": gt, "label_ids": [self.labels.index(l)+1 for l in target_labels]}
         self.run_diffusion_model(image_tensor, prompts, segment_data)
         assert segment_data["mask"][local_config.target_layer].shape[0] == len(prompts)
         prediction = segment_data["mask"][local_config.target_layer]

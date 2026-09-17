@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import einops
 
 from typing import Tuple
 
@@ -47,6 +48,42 @@ class MMDiTJointAttention(nn.Module):
         self.proj_drop_x = nn.Dropout(proj_drop)
         self.proj_drop_y = nn.Dropout(proj_drop)
 
+        self.gt_features = []
+        if not local_config.compute_projection:
+            self.proj = torch.load("basis.pt").to(torch.bfloat16).to(local_config.device)
+
+    def gather_features(self, features, segment_data):
+        B, P, H, D = features.shape
+        gt = segment_data["gt"]
+        label_ids = segment_data["label_ids"]
+
+        gt[gt == 255] = 0
+        gt_binary = torch.nn.functional.one_hot(gt[0].to(torch.int64), num_classes=21)
+        gt_binary = F.interpolate(gt_binary.permute(2,0,1).unsqueeze(0).to(features.dtype), (32, 32), mode="nearest")[0]
+        gt_binary = einops.rearrange(gt_binary, "b h w -> b (h w)")
+
+        features = einops.rearrange(features.clone(), "b p h d -> b p (h d)")
+
+        for ii in range(B):
+            for pid in range(P):
+                if gt_binary[label_ids[ii], pid] == 1:
+                    self.gt_features.append(features[0, pid])
+
+    def principal_comp_projection(self):
+        uncond_maps = torch.stack(self.gt_features, dim=0).to(torch.float32)
+        uncond_maps = torch.nn.functional.normalize(uncond_maps, p=2, dim=1)
+        uncond_maps = einops.rearrange(uncond_maps, "b d -> d b")
+        uncond_maps = uncond_maps - uncond_maps.mean(dim=1, keepdim=True)
+        print("uncond maps", uncond_maps.shape)
+        basis = torch.linalg.svd(
+            uncond_maps,
+            full_matrices=False
+        )[0]
+        basis = basis[:, :local_config.unbiasing_components_count].contiguous()
+        basis_mtrx = torch.eye(uncond_maps.shape[0], dtype=uncond_maps.dtype, device=local_config.device) - basis @ basis.T
+        print('basis matrix', basis_mtrx.shape)
+        torch.save(basis_mtrx, "basis.pt")
+
     def forward(
             self,
             x: torch.Tensor,
@@ -69,10 +106,25 @@ class MMDiTJointAttention(nn.Module):
         qy, ky, vy = qkv_y[0], qkv_y[1], qkv_y[2]
         qy = self.q_norm_y(qy)
         ky = self.k_norm_y(ky)
-        
+
+        if local_config.compute_projection:
+            self.gather_features(qx, segment_data)
+
+        if not local_config.use_projection:
+            qa = qx
+            ka = ky
+        else:
+            qa = torch.matmul(self.proj.unsqueeze(0), einops.rearrange(qx, "b p h d -> b (h d) p"))
+            qa = F.normalize(qa, p=2, dim=2)
+            qa = einops.rearrange(qa, "b (h d) p -> b p h d", h=self.num_heads)
+
+            ka = torch.matmul(self.proj.unsqueeze(0), einops.rearrange(ky, "b p h d -> b (h d) p"))
+            ka = F.normalize(ka, p=2, dim=2)
+            ka = einops.rearrange(ka, "b (h d) p -> b p h d", h=self.num_heads)
+
         my_norm = lambda x: x
-        target_tokens_y = torch.stack([ky[ii, [segment_data["tokens_count"][ii].item() - 1], :, :] for ii in range(B)], dim=0)
-        attn_mk = (my_norm(qx.permute(0,2,1,3)) @ target_tokens_y.permute(0,2,3,1)).mean(1).squeeze(-1)
+        target_tokens_y = torch.stack([ka[ii, [segment_data["tokens_count"][ii].item() - 1], :, :] for ii in range(B)], dim=0)
+        attn_mk = (my_norm(qa.permute(0,2,1,3)) @ target_tokens_y.permute(0,2,3,1)).mean(1).squeeze(-1)
 
         qx, kx = apply_rotary_emb(qx, kx, freqs_cis=pos_img)
         if pos_txt is not None:
@@ -306,8 +358,8 @@ class PixDiT_T2I(nn.Module):
 
                 if segment_data is not None:
                     segment_data["mask"][i] = attn_mk.view(B, Hs, Ws)
-                    if i == local_config.layer_count - 1:
-                        break
+                if i == local_config.layer_count - 1:
+                    break
 
             s = torch.nn.functional.silu(t_emb + s)
         if not (0 < self.repa_encoder_index <= self.patch_depth):
@@ -334,3 +386,7 @@ class PixDiT_T2I(nn.Module):
         x_pixels = x_pixels.view(B, C_out * P2, L)
         x_img = torch.nn.functional.fold(x_pixels, (H, W), kernel_size=self.patch_size, stride=self.patch_size)
         return x_img
+    
+    def __del__(self):
+        if local_config.compute_projection:
+            self.patch_blocks[0].attn.principal_comp_projection()
