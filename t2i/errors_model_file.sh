@@ -1,0 +1,1 @@
+cd ../pixdit_core; python -m pixeldit_t2i.py; cd ../t2i;

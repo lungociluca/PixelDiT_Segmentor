@@ -139,6 +139,12 @@ class Pix_Segmentor(torch.nn.Module):
     def resize_maps(maps, new_shape):
         return F.interpolate(maps[:,None,:,:], new_shape, mode="bilinear", align_corners=False).squeeze(1)
 
+    def add_extra_labels(self, gt_labels):
+        extra_labels_count = 2
+        all_extra_labels = [x for x in self.labels if x not in gt_labels]
+        samples_extra_labels = random.sample(all_extra_labels, extra_labels_count)
+        return gt_labels + samples_extra_labels 
+
     # get GT for output shapes and input prompts
     def get_gt(self, x):
         gt_file_path = x[0]['file_name'].replace(local_config.current_ds_paths["img_dir"], local_config.current_ds_paths["gt_dir"]) \
@@ -155,12 +161,14 @@ class Pix_Segmentor(torch.nn.Module):
         caption_embs = self.text_encoder(caption_token.input_ids, caption_token.attention_mask)[0][:, None][
             :, :, select_index
         ]
+        tokens_count = caption_token.attention_mask.sum(dim=-1)
         emb_masks = caption_token.attention_mask[:, select_index]
-        return caption_embs, emb_masks
-
+        return caption_embs, emb_masks, tokens_count
+    
     def run_diffusion_model(self, image, prompts, segment_data):
-        emb, emb_mask = self.embed_condition(prompts)
+        emb, emb_mask, tokens_count = self.embed_condition(prompts)
         model_kwargs = dict(data_info={"img_hw": image.shape[-2], "aspect_ratio": 1}, mask=emb_mask)
+        segment_data["tokens_count"] = tokens_count
 
         dpm_solver = DPMS(
             self.model.forward_with_dpmsolver,
@@ -205,20 +213,23 @@ class Pix_Segmentor(torch.nn.Module):
         gt = self.get_gt(x)
         h, w = gt.shape[-2:]
         file_id = Pix_Segmentor.img_id_from_path(x)
-        prompts = [local_config.prompt_format.format(target=current_target) for current_target in self.prompts_dict[file_id]]
+        target_labels = self.prompts_dict[file_id]
+        
+        if local_config.run_on_extra_labels:
+            target_labels = self.add_extra_labels(target_labels)
+        prompts = [local_config.prompt_format.format(target=current_target) for current_target in target_labels]
 
-        segment_data = {}
+        segment_data = {"labels": target_labels, "img_id": file_id}
         self.run_diffusion_model(image_tensor, prompts, segment_data)
         assert segment_data["mask"][local_config.target_layer].shape[0] == len(prompts)
         prediction = segment_data["mask"][local_config.target_layer]
-        print('prediciton', prediction.shape)
-
+        
         prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
-        predictions_all = torch.zeros((len(self.labels)+1), h, w)
+        predictions_all = torch.zeros((len(self.labels)+1), h, w).to(prediction.device)
 
         cam_dict = {}
         min_max_norm = lambda x: (x - x.min()) / (x.max() - x.min())
-        for i, current_label in enumerate(self.prompts_dict[file_id]):
+        for i, current_label in enumerate(target_labels):
             label_idx = self.labels.index(current_label) + 1
             predictions_all[label_idx-1] += prediction[i]
 

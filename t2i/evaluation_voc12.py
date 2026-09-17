@@ -179,7 +179,7 @@ class Args:
     val_split = 1.
     comment='train1464'
     curve=True
-    end=30
+    end=99
     base_dir = 'sio_maps'
     image_dir = os.path.join(base_dir,'images')
     cam_npy_dir = os.path.join(base_dir, 'images')
@@ -188,7 +188,7 @@ class Args:
     # list='/root/autodl-tmp/wjl/ptp_diffusion/voc12/train_aug_id.txt'
     logfile=os.path.join(base_dir,'eval.txt')
     num_classes=21
-    start=0
+    start=1
     t=None
     type='npy'
     sample_images=True

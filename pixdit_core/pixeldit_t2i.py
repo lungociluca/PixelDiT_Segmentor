@@ -54,6 +54,7 @@ class MMDiTJointAttention(nn.Module):
             pos_img: torch.Tensor,
             pos_txt: torch.Tensor = None,
             attn_mask: torch.Tensor = None,
+            segment_data=None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         B, Nx, C = x.shape
         By, Ny, Cy = y.shape
@@ -70,7 +71,9 @@ class MMDiTJointAttention(nn.Module):
         ky = self.k_norm_y(ky)
         
         my_norm = lambda x: x
-        attn_mk = (my_norm(qx.permute(0,2,1,3)) @ ky[:,[local_config.idx_token_of_interest],:,:].permute(0,2,3,1).detach()).cpu()
+        target_tokens_y = torch.stack([ky[ii, [segment_data["tokens_count"][ii].item() - 1], :, :] for ii in range(B)], dim=0)
+        attn_mk = (my_norm(qx.permute(0,2,1,3)) @ target_tokens_y.permute(0,2,3,1)).mean(1).squeeze(-1)
+
         qx, kx = apply_rotary_emb(qx, kx, freqs_cis=pos_img)
         if pos_txt is not None:
             qy, ky = apply_rotary_emb(qy, ky, freqs_cis=pos_txt)
@@ -121,13 +124,13 @@ class MMDiTBlockT2I(nn.Module):
         self.adaLN_modulation_img = adaLN_modulation_img if adaLN_modulation_img is not None else nn.Sequential(nn.Linear(hidden_size, 6 * hidden_size, bias=True))
         self.adaLN_modulation_txt = adaLN_modulation_txt if adaLN_modulation_txt is not None else nn.Sequential(nn.Linear(hidden_size, 6 * hidden_size, bias=True))
 
-    def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None):
+    def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None, segment_data=None):
         shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = self.adaLN_modulation_img(c).chunk(6, dim=-1)
         shift_msa_y, scale_msa_y, gate_msa_y, shift_mlp_y, scale_mlp_y, gate_mlp_y = self.adaLN_modulation_txt(c).chunk(6, dim=-1)
 
         x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
         y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
-        attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask)
+        attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data)
         x = x + gate_msa_x * attn_x
         y = y + gate_msa_y * attn_y
 
@@ -291,19 +294,19 @@ class PixDiT_T2I(nn.Module):
             self.last_repa_tokens = None
             s = s0
             for i in range(self.patch_depth):
-                s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint)
+                s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data)
                 if 0 < self.repa_encoder_index == (i + 1):
                     self.last_repa_tokens = s
                 
                 # import os
-                # attn_mk_disp = attn_mk.to(torch.float32).mean(1)[-1,:,0].view(Hs, Ws).detach().cpu()
+                # attn_mk_disp = attn_mk.to(torch.float32)[-1,:].view(Hs, Ws).detach().cpu()
                 # plt.imshow(attn_mk_disp, cmap="viridis")
                 # plt.savefig(f"trash/{i}_{len(os.listdir('trash'))}.png")
                 # plt.close()
 
                 if segment_data is not None:
+                    segment_data["mask"][i] = attn_mk.view(B, Hs, Ws)
                     if i == local_config.layer_count - 1:
-                        segment_data["mask"][i] = attn_mk.mean(1).view(B, Hs, Ws).squeeze(-1)
                         break
 
             s = torch.nn.functional.silu(t_emb + s)
