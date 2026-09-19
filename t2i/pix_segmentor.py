@@ -139,6 +139,57 @@ class Pix_Segmentor(torch.nn.Module):
     def resize_maps(maps, new_shape):
         return F.interpolate(maps[:,None,:,:], new_shape, mode="bilinear", align_corners=False).squeeze(1)
 
+    @staticmethod
+    def resize_input(images, new_shape):
+        if local_config.crop_size is None:
+            return torch.nn.functional.interpolate(
+                images[None,:,:,:],
+                size=(512, 512),
+                mode="bilinear",
+                align_corners=False
+            )
+        else:
+            H, W = images.shape[-2:]
+            top = (H - local_config.crop_size) // 2
+            left = (W - local_config.crop_size) // 2
+            return images[None, :, top:top + local_config.crop_size, left:left + local_config.crop_size]
+
+    @staticmethod
+    def pad_prediction(prediction, new_shape):
+        height, width = new_shape
+        target_ratio = width / height
+        h, w = prediction.shape[-2:]
+
+        current_ratio = w / h
+
+        if current_ratio < target_ratio:
+            # Need to increase width
+            new_w = round(h * target_ratio)
+            pad_w = new_w - w
+
+            padding = (
+                pad_w // 2,
+                pad_w - pad_w // 2,
+                0,
+                0,
+            )
+
+        elif current_ratio > target_ratio:
+            # Need to increase height
+            new_h = round(w / target_ratio)
+            pad_h = new_h - h
+
+            padding = (
+                0,
+                0,
+                pad_h // 2,
+                pad_h - pad_h // 2,
+            )
+        else:
+            # Already has the correct aspect ratio
+            return prediction
+        return torch.nn.functional.pad(prediction, padding, mode="constant", value=0)
+
     def add_extra_labels(self, gt_labels):
         extra_labels_count = 2
         all_extra_labels = [x for x in self.labels if x not in gt_labels]
@@ -183,22 +234,17 @@ class Pix_Segmentor(torch.nn.Module):
         # del self.tokenizer
         # del self.text_encoder
 
-        image = torch.nn.functional.interpolate(
-            image[None,:,:,:],
-            size=(512, 512),
-            mode="bilinear",
-            align_corners=False
-        )
+        image = Pix_Segmentor.resize_input(image, (local_config.image_size,local_config.image_size))
         samples = dpm_solver.segment(
             image.repeat(len(prompts),1,1,1),
             segment_data
         )
 
-        os.umask(0o000)
-        for i, sample in enumerate(samples):
-            save_path = os.path.join("trash", "file_9.jpg")
-            from torchvision.utils import save_image
-            save_image(sample, save_path, nrow=1, normalize=True, value_range=(-1, 1))
+        # os.umask(0o000)
+        # for i, sample in enumerate(samples):
+        #     save_path = os.path.join("trash", "file_9.jpg")
+        #     from torchvision.utils import save_image
+        #     save_image(sample, save_path, nrow=1, normalize=True, value_range=(-1, 1))
 
     @torch.no_grad()
     def forward_no_grad(self, x):
@@ -209,6 +255,7 @@ class Pix_Segmentor(torch.nn.Module):
         image_tensor = PIL.Image.open(f"{x[0]['file_name']}").convert("RGB")
         image_tensor = torch.from_numpy(np.array(image_tensor)).to(torch.bfloat16).to(local_config.device).permute(2, 0, 1) / 255
         image_tensor = (image_tensor * 2) - 1
+        original_shape = image_tensor.shape[-2:]
 
         gt = self.get_gt(x)
         h, w = gt.shape[-2:]
@@ -224,6 +271,9 @@ class Pix_Segmentor(torch.nn.Module):
         assert segment_data["mask"][local_config.target_layer].shape[0] == len(prompts)
         prediction = segment_data["mask"][local_config.target_layer]
         
+        # pad image if crops were used
+        if local_config.crop_size is not None:
+            prediction = Pix_Segmentor.pad_prediction(prediction, original_shape)
         prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
         predictions_all = torch.zeros((len(self.labels)+1), h, w).to(prediction.device)
 
@@ -234,6 +284,7 @@ class Pix_Segmentor(torch.nn.Module):
             predictions_all[label_idx-1] += prediction[i]
 
             current_pred = min_max_norm(prediction[i].to(torch.float32))
+            print("\tsaving", current_pred.shape)
             cam_dict[str(label_idx-1)] = (current_pred * 255).cpu().numpy()
 
         save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
