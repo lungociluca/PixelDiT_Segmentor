@@ -116,13 +116,10 @@ class MMDiTJointAttention(nn.Module):
         my_norm = lambda x: x
         if local_config.use_model_vectors:
             label_ids = segment_data["label_ids"]
-            target_tokens_y = einops.rearrange(
-                torch.stack([self.model_vectors[ii] for ii in label_ids], dim=0),
-                "b (h d) -> b h d", h=self.num_heads
-            )[:,None,:,:]
-
-            attn_mk = torch.linalg.vector_norm(qx - target_tokens_y, dim=-1).mean(-1)
-
+            target_tokens_y = torch.stack([self.model_vectors[ii] for ii in label_ids], dim=0)[:,None,:]
+            qa = einops.rearrange(qx.clone(), "b p h d -> b p (h d)")
+            filter_dims = (torch.stack([self.model_vectors_std[class_idx] for class_idx in label_ids],dim=0) < 0.3).int()
+            attn_mk = torch.linalg.vector_norm((qa - target_tokens_y) * filter_dims[:,None,:].to(torch.bfloat16), dim=-1)
         else:
             target_tokens_y = torch.stack([ky[ii, [segment_data["tokens_count"][ii].item() - 1], :, :] for ii in range(B)], dim=0)
             attn_mk = (my_norm(qx.permute(0,2,1,3)) @ target_tokens_y.permute(0,2,3,1)).mean(1).squeeze(-1)
