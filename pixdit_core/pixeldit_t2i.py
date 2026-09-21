@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-
+import json, einops
 from typing import Tuple
 
 from .pixeldit_c2i import PatchTokenEmbedder, PixelTokenEmbedder, PiTBlock
@@ -47,6 +47,47 @@ class MMDiTJointAttention(nn.Module):
         self.proj_drop_x = nn.Dropout(proj_drop)
         self.proj_drop_y = nn.Dropout(proj_drop)
 
+        with open(local_config.ds_config_path) as f:
+            self.labels = json.load(f)
+
+        if local_config.compute_model_vectors:
+            self.model_vectors = {i: [] for i in range(len(self.labels))}
+        if local_config.use_model_vectors:
+            self.model_vectors = torch.load("models.pt").to(local_config.device)
+            self.model_vectors_std = torch.load("std.pt").to(local_config.device)
+
+    def gather_model_vectors(self, features, segment_data):
+        B, P, H, D = features.shape
+        gt = segment_data["gt"]
+        label_ids = segment_data["label_ids"]
+
+        gt[gt == 255] = 0
+        gt_binary = torch.nn.functional.one_hot(gt[0].to(torch.int64), num_classes=21)
+        gt_binary = F.interpolate(gt_binary.permute(2,0,1).unsqueeze(0).to(features.dtype), (32, 32), mode="nearest")[0]
+        gt_binary = einops.rearrange(gt_binary, "b h w -> b (h w)")
+
+        features = einops.rearrange(features.clone(), "b p h d -> b p (h d)")
+        for ii in range(B):
+            for pid in range(P):
+                class_label = label_ids[ii]
+                if gt_binary[class_label+1, pid] == 1:
+                    self.model_vectors[class_label].append(features[0, pid].to(torch.float32).detach().cpu())
+
+    def __del__(self):
+        if local_config.compute_model_vectors and sum([len(vals) for vals in self.model_vectors.values()]) > 0:
+            mean_tensor = torch.zeros((len(self.labels), self.num_heads * self.head_dim), dtype=torch.bfloat16)
+            std_tensor = torch.zeros((len(self.labels), self.num_heads * self.head_dim), dtype=torch.bfloat16)
+            for class_idx, values_list in self.model_vectors.items():
+                try:
+                    stacked_values = torch.stack(values_list, dim=0)
+                except RuntimeError as e:
+                    print(f"could not create stack for class {class_idx}")
+                else:
+                    mean_tensor[class_idx] += stacked_values.mean(dim=0)
+                    std_tensor[class_idx] += stacked_values.std(dim=0)
+            torch.save(mean_tensor, "models.pt")
+            torch.save(std_tensor, "std.pt")
+
     def forward(
             self,
             x: torch.Tensor,
@@ -70,9 +111,21 @@ class MMDiTJointAttention(nn.Module):
         qy = self.q_norm_y(qy)
         ky = self.k_norm_y(ky)
         
+        if local_config.compute_model_vectors:
+            self.gather_model_vectors(qx, segment_data)
         my_norm = lambda x: x
-        target_tokens_y = torch.stack([ky[ii, [segment_data["tokens_count"][ii].item() - 1], :, :] for ii in range(B)], dim=0)
-        attn_mk = (my_norm(qx.permute(0,2,1,3)) @ target_tokens_y.permute(0,2,3,1)).mean(1).squeeze(-1)
+        if local_config.use_model_vectors:
+            label_ids = segment_data["label_ids"]
+            target_tokens_y = einops.rearrange(
+                torch.stack([self.model_vectors[ii] for ii in label_ids], dim=0),
+                "b (h d) -> b h d", h=self.num_heads
+            )[:,None,:,:]
+
+            attn_mk = torch.linalg.vector_norm(qx - target_tokens_y, dim=-1).mean(-1)
+
+        else:
+            target_tokens_y = torch.stack([ky[ii, [segment_data["tokens_count"][ii].item() - 1], :, :] for ii in range(B)], dim=0)
+            attn_mk = (my_norm(qx.permute(0,2,1,3)) @ target_tokens_y.permute(0,2,3,1)).mean(1).squeeze(-1)
 
         qx, kx = apply_rotary_emb(qx, kx, freqs_cis=pos_img)
         if pos_txt is not None:

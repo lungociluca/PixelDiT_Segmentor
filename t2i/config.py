@@ -36,10 +36,12 @@ ds_config_path = current_ds_paths["json"]
 image_size = 512
 
 idx_token_of_interest = 0
-eval_samples_limit = 8
+eval_samples_limit = 12
 target_layer = 0
 layer_count = 1
 timestep = 0.002
 
 run_on_extra_labels = False
 crop_size = None
+compute_model_vectors = False
+use_model_vectors = True

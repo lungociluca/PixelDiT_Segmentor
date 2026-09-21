@@ -267,6 +267,11 @@ class Pix_Segmentor(torch.nn.Module):
         prompts = [local_config.prompt_format.format(target=current_target) for current_target in target_labels]
 
         segment_data = {"labels": target_labels, "img_id": file_id}
+        if local_config.compute_model_vectors:
+            segment_data["gt"] = gt
+        if local_config.compute_model_vectors or local_config.use_model_vectors:
+            segment_data["label_ids"] = [self.labels.index(t) for t in target_labels]
+
         self.run_diffusion_model(image_tensor, prompts, segment_data)
         assert segment_data["mask"][local_config.target_layer].shape[0] == len(prompts)
         prediction = segment_data["mask"][local_config.target_layer]
@@ -284,7 +289,6 @@ class Pix_Segmentor(torch.nn.Module):
             predictions_all[label_idx-1] += prediction[i]
 
             current_pred = min_max_norm(prediction[i].to(torch.float32))
-            print("\tsaving", current_pred.shape)
             cam_dict[str(label_idx-1)] = (current_pred * 255).cpu().numpy()
 
         save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
