@@ -141,7 +141,7 @@ class Pix_Segmentor(torch.nn.Module):
 
     @staticmethod
     def resize_input(images, new_shape):
-        if local_config.crop_size is None:
+        if not local_config.crop:
             return torch.nn.functional.interpolate(
                 images[None,:,:,:],
                 size=(512, 512),
@@ -150,9 +150,11 @@ class Pix_Segmentor(torch.nn.Module):
             )
         else:
             H, W = images.shape[-2:]
-            top = (H - local_config.crop_size) // 2
-            left = (W - local_config.crop_size) // 2
-            return images[None, :, top:top + local_config.crop_size, left:left + local_config.crop_size]
+            crop_h = (H // 16) * 16
+            crop_w = (W // 16) * 16
+            top = (H - crop_h) // 2
+            left = (W - crop_w) // 2
+            return images[None, :, top:top + crop_h, left:left + crop_w]
 
     @staticmethod
     def pad_prediction(prediction, new_shape):
@@ -272,7 +274,7 @@ class Pix_Segmentor(torch.nn.Module):
         prediction = segment_data["mask"][local_config.target_layer]
         
         # pad image if crops were used
-        if local_config.crop_size is not None:
+        if local_config.crop:
             prediction = Pix_Segmentor.pad_prediction(prediction, original_shape)
         prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
         predictions_all = torch.zeros((len(self.labels)+1), h, w).to(prediction.device)

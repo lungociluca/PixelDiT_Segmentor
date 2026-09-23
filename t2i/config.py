@@ -42,4 +42,4 @@ layer_count = 1
 timestep = 0.002
 
 run_on_extra_labels = False
-crop_size = None
+crop = True
