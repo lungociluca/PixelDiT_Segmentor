@@ -150,9 +150,11 @@ class Pix_Segmentor(torch.nn.Module):
             )
         else:
             H, W = images.shape[-2:]
-            top = (H - local_config.crop_size) // 2
-            left = (W - local_config.crop_size) // 2
-            return images[None, :, top:top + local_config.crop_size, left:left + local_config.crop_size]
+            crop_h = (H // 16) * 16
+            crop_w = (W // 16) * 16
+            top = (H - crop_h) // 2
+            left = (W - crop_w) // 2
+            return images[None, :, top:top + crop_h, left:left + crop_w]
 
     @staticmethod
     def pad_prediction(prediction, new_shape):
