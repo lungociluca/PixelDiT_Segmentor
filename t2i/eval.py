@@ -10,6 +10,7 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Subset, DataLoader
 
 from pix_segmentor import Pix_Segmentor
@@ -29,12 +30,13 @@ from detectron2.data import build_detection_test_loader
 from detectron2.utils.file_io import PathManager
 from detectron2.evaluation import (
     DatasetEvaluator,
-    inference_on_dataset,
+    # inference_on_dataset,
     print_csv_format,
     verify_results,
 )
 import numpy as np
 from PIL import Image
+from inference_on_dataset import inference_on_dataset
 import config as local_config
 
 # from cat_seg_conf import add_cat_seg_config
@@ -82,6 +84,27 @@ class Trainer(DefaultTrainer):
     def build_model(cls, cfg):
         return Pix_Segmentor()
     
+    @classmethod
+    def build_optimizer(cls, cfg, model):
+
+        # ONLY optimize the learnable token
+        token_params = [
+            param
+            for name, param in model.named_parameters()
+            if "learnable_token" in name and param.requires_grad
+        ]
+
+        assert len(token_params) > 0, \
+            "No trainable learnable_token parameter found."
+
+        optimizer = torch.optim.AdamW(
+            token_params,
+            lr=cfg.SOLVER.BASE_LR,
+            weight_decay=cfg.SOLVER.WEIGHT_DECAY,
+        )
+
+        return optimizer
+
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
         """
@@ -162,6 +185,9 @@ class Trainer(DefaultTrainer):
     #     return res
 
 
+def learn_token(inputs):
+    for inp in inputs:
+        print("eval loss", inp["learnable_token_loss"])
 
 class CustomTrainer(Trainer):
 
@@ -221,7 +247,7 @@ class CustomTrainer(Trainer):
                     )
                     results[dataset_name] = {}
                     continue
-            results_i = inference_on_dataset(model, data_loader, evaluator)
+            results_i = inference_on_dataset(model, data_loader, evaluator, callbacks={"after_inference": learn_token})
             results[dataset_name] = results_i
             if comm.is_main_process():
                 assert isinstance(
@@ -235,6 +261,76 @@ class CustomTrainer(Trainer):
         if len(results) == 1:
             results = list(results.values())[0]
         return results
+
+    @staticmethod
+    def freeze_pretrained_backbone(model):
+        """Freeze the pretrained backbone and leave only the probe token trainable."""
+        for name, param in model.named_parameters():
+            param.requires_grad = ("learnable_token" in name)
+        return model
+
+    @staticmethod
+    def train_learnable_token_only(model, dataloader, optimizer, device, epochs=1, max_steps=None, accumulation_steps=1):
+        """Train only the learnable token with optional gradient accumulation.
+
+        This matches the intended behavior of a readout-only token: it can attend to text and image
+        tokens, but it does not modify the original model's forward behavior.
+        """
+        if accumulation_steps < 1:
+            raise ValueError("accumulation_steps must be >= 1")
+
+        if hasattr(model, "model"):
+            backbone = model.model
+        else:
+            backbone = model
+
+        backbone.train()
+        CustomTrainer.freeze_pretrained_backbone(backbone)
+
+        total_loss = 0.0
+        steps = 0
+        optimizer.zero_grad(set_to_none=True)
+
+        for _ in range(epochs):
+            for batch in dataloader:
+                if isinstance(batch, dict):
+                    if "image" in batch:
+                        x = batch["image"].to(device)
+                    else:
+                        raise KeyError("batch dictionary must contain an 'image' field")
+                    if "text_emb" in batch:
+                        y = batch["text_emb"].to(device)
+                    else:
+                        raise KeyError("batch dictionary must contain a 'text_emb' field")
+                else:
+                    x, y = batch
+                    x = x.to(device)
+                    y = y.to(device)
+
+                t = torch.zeros(x.shape[0], device=device, dtype=x.dtype)
+
+                with torch.set_grad_enabled(True):
+                    _ = backbone(x, t, y, s=None, mask=None)
+
+                loss = F.mse_loss(backbone.learnable_token, backbone.learnable_token_target.to(device))
+                scaled_loss = loss / accumulation_steps
+                scaled_loss.backward()
+
+                total_loss += float(loss.item())
+                steps += 1
+
+                if steps % accumulation_steps == 0 or (max_steps is not None and steps >= max_steps):
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+
+                if max_steps is not None and steps >= max_steps:
+                    return total_loss / steps
+
+        if steps % accumulation_steps != 0:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+        return total_loss / max(steps, 1)
 
 def setup(args):
     """

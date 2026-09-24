@@ -43,6 +43,10 @@ class MMDiTJointAttention(nn.Module):
 
         self.proj_x = nn.Linear(dim, dim)
         self.proj_y = nn.Linear(dim, dim)
+        # self.token_q = nn.Linear(dim, dim, bias=qkv_bias)
+        # self.token_k = nn.Linear(dim, dim, bias=qkv_bias)
+        # self.token_v = nn.Linear(dim, dim, bias=qkv_bias)
+        # self.token_out = nn.Linear(dim, dim, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj_drop_x = nn.Dropout(proj_drop)
         self.proj_drop_y = nn.Dropout(proj_drop)
@@ -95,8 +99,9 @@ class MMDiTJointAttention(nn.Module):
             pos_img: torch.Tensor,
             pos_txt: torch.Tensor = None,
             attn_mask: torch.Tensor = None,
-            segment_data=None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+            segment_data=None,
+            learnable_token: torch.Tensor = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         B, Nx, C = x.shape
         By, Ny, Cy = y.shape
         assert B == By and C == Cy, "x and y must share batch and channel dims"
@@ -110,7 +115,19 @@ class MMDiTJointAttention(nn.Module):
         qy, ky, vy = qkv_y[0], qkv_y[1], qkv_y[2]
         qy = self.q_norm_y(qy)
         ky = self.k_norm_y(ky)
-        
+
+        # token_readout = None
+        # if learnable_token is not None:
+        #     qt = self.token_q(learnable_token).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        #     qk = self.token_k(learnable_token).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        #     qv = self.token_v(learnable_token).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        #     qt = self.q_norm_y(qt)
+        #     k_joint = torch.cat([ky.detach(), kx.detach()], dim=2)
+        #     v_joint = torch.cat([vy.detach(), vx.detach()], dim=2)
+        #     token_readout = F.scaled_dot_product_attention(qt, k_joint, v_joint, dropout_p=0.0, attn_mask=attn_mask)
+        #     token_readout = token_readout.transpose(1, 2).reshape(B, 1, C)
+        #     token_readout = self.proj_drop_y(self.token_out(token_readout))
+
         if local_config.compute_model_vectors:
             self.gather_model_vectors(qx, segment_data)
         my_norm = lambda x: x
@@ -149,7 +166,7 @@ class MMDiTJointAttention(nn.Module):
 
         out_x = self.proj_drop_x(self.proj_x(out_x))
         out_y = self.proj_drop_y(self.proj_y(out_y))
-        return out_x, out_y, attn_mk
+        return out_x, out_y, attn_mk, learnable_token.clone()
 
 
 class MMDiTBlockT2I(nn.Module):
@@ -174,19 +191,19 @@ class MMDiTBlockT2I(nn.Module):
         self.adaLN_modulation_img = adaLN_modulation_img if adaLN_modulation_img is not None else nn.Sequential(nn.Linear(hidden_size, 6 * hidden_size, bias=True))
         self.adaLN_modulation_txt = adaLN_modulation_txt if adaLN_modulation_txt is not None else nn.Sequential(nn.Linear(hidden_size, 6 * hidden_size, bias=True))
 
-    def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None, segment_data=None):
+    def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None, segment_data=None, learnable_token=None):
         shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = self.adaLN_modulation_img(c).chunk(6, dim=-1)
         shift_msa_y, scale_msa_y, gate_msa_y, shift_mlp_y, scale_mlp_y, gate_mlp_y = self.adaLN_modulation_txt(c).chunk(6, dim=-1)
 
         x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
         y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
-        attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data)
+        attn_x, attn_y, attn_mk, token_readout = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data, learnable_token=learnable_token)
         x = x + gate_msa_x * attn_x
         y = y + gate_msa_y * attn_y
 
         x = x + gate_mlp_x * self.mlp_x(apply_adaln(self.norm_x2(x), shift_mlp_x, scale_mlp_x))
         y = y + gate_mlp_y * self.mlp_y(apply_adaln(self.norm_y2(y), shift_mlp_y, scale_mlp_y))
-        return x, y, attn_mk
+        return x, y, attn_mk, token_readout
 
 
 class PixDiT_T2I(nn.Module):
@@ -235,6 +252,8 @@ class PixDiT_T2I(nn.Module):
         self.t_embedder = TimestepConditioner(hidden_size)
         self.y_embedder = PatchTokenEmbedder(self.txt_embed_dim, hidden_size, bias=True, norm_layer=RMSNorm)
         self.y_pos_embedding = nn.Parameter(torch.randn(1, self.txt_max_length, hidden_size))
+        self.learnable_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        # self.register_buffer("learnable_token_target", torch.ones(1, 1, hidden_size), persistent=False)
 
         self._shared_cond_adaln = None
         self._shared_cond_adaln_img = None
@@ -275,6 +294,7 @@ class PixDiT_T2I(nn.Module):
         self.precompute_pos = dict()
         self.precompute_pos_txt = dict()
         self.last_repa_tokens = None
+        self.last_token_readout = None
 
         self.initialize_weights()
 
@@ -319,10 +339,12 @@ class PixDiT_T2I(nn.Module):
 
         if y.dim() != 3:
             raise ValueError("Text embedding y must be [B, L, D]")
-        Ltxt = min(y.shape[1], self.txt_max_length)
+        Ltxt = min(y.shape[1], max(1, self.txt_max_length - 1))
         y = y[:, :Ltxt, :]
         y_emb = self.y_embedder(y).view(B, Ltxt, self.hidden_size)
         y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
+        segment_data["loss"] = F.mse_loss(self.learnable_token, torch.ones((1, 1, self.hidden_size), device=local_config.device))
+        learnable_token = self.learnable_token.expand(B, -1, -1)
 
         condition = torch.nn.functional.silu(t_emb)
         if segment_data is not None:
@@ -342,9 +364,11 @@ class PixDiT_T2I(nn.Module):
                     pad_img = torch.zeros((B, L), dtype=torch.bool, device=x.device)
                     attn_mask_joint = torch.cat([pad[:, :Ltxt], pad_img], dim=1).view(B, 1, 1, Ltxt + L)
             self.last_repa_tokens = None
+            self.last_token_readout = None
             s = s0
             for i in range(self.patch_depth):
-                s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data)
+                s, y_emb, attn_mk, token_readout = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data, learnable_token=learnable_token)
+                self.last_token_readout = token_readout
                 if 0 < self.repa_encoder_index == (i + 1):
                     self.last_repa_tokens = s
                 

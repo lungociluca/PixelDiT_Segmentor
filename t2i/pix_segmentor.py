@@ -57,7 +57,7 @@ class PixelDiTInference(PixDiTConfig):
 
 def set_env(seed=0, latent_size=256):
     torch.manual_seed(seed)
-    torch.set_grad_enabled(False)
+    # torch.set_grad_enabled(False)
     for _ in range(30):
         torch.randn(1, 4, latent_size, latent_size)
 
@@ -95,6 +95,8 @@ def get_model():
     logger.info(f"Inference with {weight_dtype}, guidance_type: {guidance_type}, flow_shift: {flow_shift}")
 
     tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder.text_encoder_name, device=device)
+    for param in text_encoder.parameters():
+        param.requires_grad = False
 
     null_caption_token = tokenizer(
         args.negative_prompt if hasattr(args, "negative_prompt") and len(args.negative_prompt) > 0 else "",
@@ -109,7 +111,11 @@ def get_model():
     model_kwargs = model_init_config(config, latent_size=latent_size)
     model = build_model(
         config.model.model, use_fp32_attention=config.model.get("fp32_attention", False), **model_kwargs
-    ).to(device)
+    )
+    for name, param in model.named_parameters():
+        param.requires_grad = ("learnable_token" in name)
+        
+    model = model.to(device)
     logger.info(
         f"{model.__class__.__name__}:{config.model.model}, Model Parameters: {sum(p.numel() for p in model.parameters()):,}"
     )
@@ -118,7 +124,7 @@ def get_model():
         del state_dict["state_dict"]["pos_embed"]
 
     missing, unexpected = model.load_state_dict(state_dict["state_dict"], strict=False)
-    return model.eval().to(torch.bfloat16), tokenizer, text_encoder
+    return model.eval().to(torch.bfloat16), tokenizer, text_encoder.eval()
 
 class Pix_Segmentor(torch.nn.Module):
 
@@ -296,7 +302,7 @@ class Pix_Segmentor(torch.nn.Module):
         save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
         sio.savemat(save_path, cam_dict, do_compression=True)
         
-        return [{"sem_seg": predictions_all}]
+        return [{"sem_seg": predictions_all, "learnable_token_loss": segment_data["loss"]}]
     
     def forward(self, x):
         return self.forward_no_grad(x)
