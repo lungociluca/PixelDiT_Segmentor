@@ -8,6 +8,7 @@ from collections import OrderedDict
 import logging
 import os
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -85,7 +86,7 @@ class Trainer(DefaultTrainer):
         return Pix_Segmentor()
     
     @classmethod
-    def build_optimizer(cls, cfg, model):
+    def build_optimizer(cls, model):
 
         # ONLY optimize the learnable token
         token_params = [
@@ -97,10 +98,11 @@ class Trainer(DefaultTrainer):
         assert len(token_params) > 0, \
             "No trainable learnable_token parameter found."
 
+        # TODO
         optimizer = torch.optim.AdamW(
             token_params,
-            lr=cfg.SOLVER.BASE_LR,
-            weight_decay=cfg.SOLVER.WEIGHT_DECAY,
+            lr=3e-3,
+            weight_decay=0.05,
         )
 
         return optimizer
@@ -185,10 +187,6 @@ class Trainer(DefaultTrainer):
     #     return res
 
 
-def learn_token(inputs):
-    for inp in inputs:
-        print("eval loss", inp["learnable_token_loss"])
-
 class CustomTrainer(Trainer):
 
     @staticmethod
@@ -235,6 +233,14 @@ class CustomTrainer(Trainer):
             data_loader = CustomTrainer.trim_data_loader(cls.build_test_loader(cfg, dataset_name), local_config.eval_samples_limit)
             # When evaluators are passed in as arguments,
             # implicitly assume that evaluators can be created before data_loader.
+            optimizer = cls.build_optimizer(model)
+
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=math.ceil(len(data_loader) / local_config.grad_accumulation),
+                eta_min=1e-4,
+            )
+
             if evaluators is not None:
                 evaluator = evaluators[idx]
             else:
@@ -247,7 +253,8 @@ class CustomTrainer(Trainer):
                     )
                     results[dataset_name] = {}
                     continue
-            results_i = inference_on_dataset(model, data_loader, evaluator, callbacks={"after_inference": learn_token})
+            results_i = inference_on_dataset(model, data_loader, evaluator,
+                optimizer=optimizer, gradient_accumulation_steps=local_config.grad_accumulation)
             results[dataset_name] = results_i
             if comm.is_main_process():
                 assert isinstance(
