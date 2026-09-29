@@ -36,12 +36,12 @@ ds_config_path = current_ds_paths["json"]
 image_size = 512
 
 idx_token_of_interest = 0
-eval_samples_limit = 30
+eval_samples_limit = 40
 target_layer = 0
 layer_count = 1
 timestep = 0.002
 grad_accumulation = 3
-no_leanable_tokens = 5
+no_leanable_tokens = 30
 
 run_on_extra_labels = False
 crop_size = True

@@ -101,7 +101,7 @@ class Trainer(DefaultTrainer):
         # TODO
         optimizer = torch.optim.AdamW(
             token_params,
-            lr=3e-3,
+            lr=3e-2,
             weight_decay=0.05,
         )
 

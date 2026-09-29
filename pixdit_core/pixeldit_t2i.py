@@ -45,16 +45,11 @@ class MMDiTJointAttention(nn.Module):
 
         self.proj_x = nn.Linear(dim, dim)
         self.proj_y = nn.Linear(dim, dim)
-        # self.token_q = nn.Linear(dim, dim, bias=qkv_bias)
-        # self.token_k = nn.Linear(dim, dim, bias=qkv_bias)
-        # self.token_v = nn.Linear(dim, dim, bias=qkv_bias)
-        # self.token_out = nn.Linear(dim, dim, bias=qkv_bias)
+
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj_drop_x = nn.Dropout(proj_drop)
         self.proj_drop_y = nn.Dropout(proj_drop)
         self.block_id = block_id
-
-        self.learnable_token = nn.Embedding(local_config.no_leanable_tokens, dim)
 
         with open(local_config.ds_config_path) as f:
             self.labels = json.load(f)
@@ -68,6 +63,26 @@ class MMDiTJointAttention(nn.Module):
             attn_mask: torch.Tensor = None,
             segment_data=None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # TODO: check corectness: slicing y so that it matches the dimensions of rotary embeddings
+        B, _, C = y.shape
+        pos_emb_size = y.shape[1] - local_config.no_leanable_tokens
+        qy_learned, ky_learned, vy_learned  = self.qkv_y(y[:,:pos_emb_size]).reshape(B, pos_emb_size, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
+        qy_learned = self.q_norm_y(qy_learned)
+        ky_learned = self.k_norm_y(ky_learned)
+        if pos_txt is not None:
+            qy_learned, ky_learned = apply_rotary_emb(qy_learned, ky_learned, freqs_cis=pos_txt)
+        qy_learned = qy_learned.transpose(1, 2)
+        ky_learned = ky_learned.transpose(1, 2)
+        vy_learned = vy_learned.transpose(1, 2)
+        out_joint_learned = F.scaled_dot_product_attention(qy_learned, ky_learned, vy_learned, dropout_p=0.0)[:,:,:local_config.no_leanable_tokens,:]
+        out_y_learned = out_joint_learned.transpose(1, 2).reshape(B, local_config.no_leanable_tokens, C)
+        # TODO: implement dropout
+        out_y_learned = self.proj_y(out_y_learned)
+        segment_data["learned"] = out_y_learned
+
+        # remove learnable tokens after they attented with prompt tokens
+        y = y[:, local_config.no_leanable_tokens:, :]
+
         B, Nx, C = x.shape
         By, Ny, Cy = y.shape
         assert B == By and C == Cy, "x and y must share batch and channel dims"
@@ -81,18 +96,6 @@ class MMDiTJointAttention(nn.Module):
         qy, ky, vy = qkv_y[0], qkv_y[1], qkv_y[2]
         qy = self.q_norm_y(qy)
         ky = self.k_norm_y(ky)
-
-        # token_readout = None
-        # if learnable_token is not None:
-        #     qt = self.token_q(learnable_token).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-        #     qk = self.token_k(learnable_token).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-        #     qv = self.token_v(learnable_token).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-        #     qt = self.q_norm_y(qt)
-        #     k_joint = torch.cat([ky.detach(), kx.detach()], dim=2)
-        #     v_joint = torch.cat([vy.detach(), vx.detach()], dim=2)
-        #     token_readout = F.scaled_dot_product_attention(qt, k_joint, v_joint, dropout_p=0.0, attn_mask=attn_mask)
-        #     token_readout = token_readout.transpose(1, 2).reshape(B, 1, C)
-        #     token_readout = self.proj_drop_y(self.token_out(token_readout))
 
         my_norm = lambda x: x
         target_tokens_y = torch.stack([ky[ii, [segment_data["tokens_count"][ii].item() - 1], :, :] for ii in range(B)], dim=0)
@@ -130,10 +133,6 @@ class MMDiTJointAttention(nn.Module):
         out_y = self.proj_drop_y(self.proj_y(out_y))
         return out_x, out_y, attn_mk
 
-    def __del__(self):
-        if local_config.save_learned_tokens:
-            torch.save(self.learnable_token, f"learnable_token_{self.block_id}.pt")
-
 class MMDiTBlockT2I(nn.Module):
     def __init__(self, hidden_size, groups, mlp_ratio=4.0, adaLN_modulation_img=None, adaLN_modulation_txt=None, block_id=-1):
         super().__init__()
@@ -143,6 +142,7 @@ class MMDiTBlockT2I(nn.Module):
 
         self.norm_x1 = RMSNorm(hidden_size, eps=1e-6)
         self.norm_y1 = RMSNorm(hidden_size, eps=1e-6)
+        self.norm_learnable_token = RMSNorm(hidden_size, eps=1e-6)
 
         self.attn = MMDiTJointAttention(hidden_size, num_heads=groups, qkv_bias=False, block_id=block_id)
 
@@ -156,13 +156,77 @@ class MMDiTBlockT2I(nn.Module):
         self.adaLN_modulation_img = adaLN_modulation_img if adaLN_modulation_img is not None else nn.Sequential(nn.Linear(hidden_size, 6 * hidden_size, bias=True))
         self.adaLN_modulation_txt = adaLN_modulation_txt if adaLN_modulation_txt is not None else nn.Sequential(nn.Linear(hidden_size, 6 * hidden_size, bias=True))
 
+        self.block_id = block_id
+        self.learnable_token = nn.Embedding(local_config.no_leanable_tokens, hidden_size)
+
+    # def gather_features(self, features, segment_data):
+    #     B, P, D = features.shape
+    #     gt = segment_data["gt"]
+    #     label_ids = segment_data["label_ids"]
+
+    #     gt[gt == 255] = 0
+    #     gt_binary = torch.nn.functional.one_hot(gt[0].to(torch.int64), num_classes=21)
+    #     gt_binary = F.interpolate(gt_binary.permute(2,0,1).unsqueeze(0).to(features.dtype), (32, 32), mode="nearest")[0]
+    #     gt_binary = einops.rearrange(gt_binary, "b h w -> b (h w)")
+        
+    #     targets = []
+    #     for ii in range(B):
+    #         gt_class_features = torch.stack(
+    #             [features[0, pid] for pid in range(P) if gt_binary[label_ids[ii], pid] == 1]
+    #         )
+    #         targets.append(gt_class_features.mean(dim=0))
+    #     segment_data["targets"] = torch.stack(targets)
+    #     segment_data["gt_binary"] = gt_binary
+
+    @staticmethod
+    def get_gt_bin(segment_data):
+        gt = segment_data["gt"]
+        label_ids = segment_data["label_ids"]
+        h, w = segment_data["hw"]
+
+        gt[gt == 255] = 0
+        gt_binary = torch.nn.functional.one_hot(gt[0].to(torch.int64), num_classes=21)
+        gt_binary = F.interpolate(gt_binary.permute(2,0,1).unsqueeze(0).to(torch.bfloat16), (h, w), mode="nearest")[0]
+        gt_binary =  einops.rearrange(gt_binary, "b h w -> b (h w)")
+        return torch.stack([gt_binary[lid] for lid in label_ids], dim=0)
+
+    def compute_loss(self, features, segment_data):
+        B, P, D = features.shape
+        gt_bin = self.get_gt_bin(segment_data).to(local_config.device)
+        # TODO
+        tokens = self.norm_learnable_token(self.learnable_token.weight)
+        masks = features @ tokens.expand(B, -1, -1).permute(0, 2, 1)
+        merged_mask = masks.sum(dim=-1)
+        merged_mask = merged_mask.sigmoid()
+
+        intersection = (gt_bin * merged_mask).sum(dim=-1)
+        union = merged_mask.sum(dim=-1) + gt_bin.sum(dim=-1) - intersection
+        iou = (intersection + 1e-7) / (union + 1e-7)
+        # TODO: does this add less importance to examples with 2 classes per image than 1?
+        return 1.0 - iou.mean()
+
     def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None, segment_data=None):
+        print("tokens", [self.learnable_token.weight[ii].mean().item() for ii in range(4)])
         shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = self.adaLN_modulation_img(c).chunk(6, dim=-1)
         shift_msa_y, scale_msa_y, gate_msa_y, shift_mlp_y, scale_mlp_y, gate_mlp_y = self.adaLN_modulation_txt(c).chunk(6, dim=-1)
 
-        x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
-        y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
-        attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data)
+        # add learnable tokens
+        with torch.enable_grad():
+
+            y = torch.cat([self.learnable_token.weight.expand(y.shape[0], -1, -1), y], dim=1)
+            # y = torch.cat([torch.load("learnable_token_0.pt", weights_only=False).to("cuda").to(torch.bfloat16).weight.expand(y.shape[0], -1, -1), y], dim=1)
+            
+            x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
+            y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
+            attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data)
+            loss = self.compute_loss(x, segment_data)
+            print("LOSS", loss.item())
+            
+        segment_data["loss"] = tmp
+
+        # remove learnable tokens
+        y = y[:, local_config.no_leanable_tokens:, :]
+
         x = x + gate_msa_x * attn_x
         y = y + gate_msa_y * attn_y
 
@@ -170,6 +234,9 @@ class MMDiTBlockT2I(nn.Module):
         y = y + gate_mlp_y * self.mlp_y(apply_adaln(self.norm_y2(y), shift_mlp_y, scale_mlp_y))
         return x, y, attn_mk
 
+    def __del__(self):
+        if local_config.save_learned_tokens:
+            torch.save(self.learnable_token, f"learnable_token_{self.block_id}.pt")
 
 class PixDiT_T2I(nn.Module):
     def __init__(
@@ -230,7 +297,7 @@ class PixDiT_T2I(nn.Module):
                 adaLN_modulation_txt=self._shared_cond_adaln_txt,
                 block_id=i
             )
-            for i in range(self.patch_depth)
+            for i in range(min(self.patch_depth, local_config.layer_count))
         ])
         self.text_refine_blocks = None
         self.pixel_attn_hidden_size = (
@@ -312,6 +379,7 @@ class PixDiT_T2I(nn.Module):
         condition = torch.nn.functional.silu(t_emb)
         if segment_data is not None:
             segment_data["mask"] = {}
+            segment_data["hw"] = (Hs,Ws)
         if s is None:
             s0 = self.s_embedder(x_patches)
             pos_txt = self.fetch_pos_text(Ltxt, x.device) if self.use_text_rope else None
