@@ -101,11 +101,6 @@ class MMDiTJointAttention(nn.Module):
         target_tokens_y = torch.stack([ky[ii, [segment_data["tokens_count"][ii].item() - 1], :, :] for ii in range(B)], dim=0)
         attn_mk = (my_norm(qx.permute(0,2,1,3)) @ target_tokens_y.permute(0,2,3,1)).mean(1).squeeze(-1)
 
-        with torch.enable_grad():
-            tmp = F.mse_loss(self.learnable_token.weight, torch.ones((local_config.no_leanable_tokens, self.dim), device=local_config.device))
-            print("LOSS", tmp.item())
-        segment_data["loss"] = tmp
-
         qx, kx = apply_rotary_emb(qx, kx, freqs_cis=pos_img)
         if pos_txt is not None:
             qy, ky = apply_rotary_emb(qy, ky, freqs_cis=pos_txt)
@@ -142,7 +137,7 @@ class MMDiTBlockT2I(nn.Module):
 
         self.norm_x1 = RMSNorm(hidden_size, eps=1e-6)
         self.norm_y1 = RMSNorm(hidden_size, eps=1e-6)
-        self.norm_learnable_token = RMSNorm(hidden_size, eps=1e-6)
+        # self.norm_learnable_token = RMSNorm(hidden_size, eps=1e-6)
 
         self.attn = MMDiTJointAttention(hidden_size, num_heads=groups, qkv_bias=False, block_id=block_id)
 
@@ -178,51 +173,17 @@ class MMDiTBlockT2I(nn.Module):
     #     segment_data["targets"] = torch.stack(targets)
     #     segment_data["gt_binary"] = gt_binary
 
-    @staticmethod
-    def get_gt_bin(segment_data):
-        gt = segment_data["gt"]
-        label_ids = segment_data["label_ids"]
-        h, w = segment_data["hw"]
-
-        gt[gt == 255] = 0
-        gt_binary = torch.nn.functional.one_hot(gt[0].to(torch.int64), num_classes=21)
-        gt_binary = F.interpolate(gt_binary.permute(2,0,1).unsqueeze(0).to(torch.bfloat16), (h, w), mode="nearest")[0]
-        gt_binary =  einops.rearrange(gt_binary, "b h w -> b (h w)")
-        return torch.stack([gt_binary[lid] for lid in label_ids], dim=0)
-
-    def compute_loss(self, features, segment_data):
-        B, P, D = features.shape
-        gt_bin = self.get_gt_bin(segment_data).to(local_config.device)
-        # TODO
-        tokens = self.norm_learnable_token(self.learnable_token.weight)
-        masks = features @ tokens.expand(B, -1, -1).permute(0, 2, 1)
-        merged_mask = masks.sum(dim=-1)
-        merged_mask = merged_mask.sigmoid()
-
-        intersection = (gt_bin * merged_mask).sum(dim=-1)
-        union = merged_mask.sum(dim=-1) + gt_bin.sum(dim=-1) - intersection
-        iou = (intersection + 1e-7) / (union + 1e-7)
-        # TODO: does this add less importance to examples with 2 classes per image than 1?
-        return 1.0 - iou.mean()
-
     def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None, segment_data=None):
-        print("tokens", [self.learnable_token.weight[ii].mean().item() for ii in range(4)])
         shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = self.adaLN_modulation_img(c).chunk(6, dim=-1)
         shift_msa_y, scale_msa_y, gate_msa_y, shift_mlp_y, scale_mlp_y, gate_mlp_y = self.adaLN_modulation_txt(c).chunk(6, dim=-1)
 
         # add learnable tokens
         with torch.enable_grad():
-
             y = torch.cat([self.learnable_token.weight.expand(y.shape[0], -1, -1), y], dim=1)
             # y = torch.cat([torch.load("learnable_token_0.pt", weights_only=False).to("cuda").to(torch.bfloat16).weight.expand(y.shape[0], -1, -1), y], dim=1)
-            
             x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
             y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
             attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data)
-            loss = self.compute_loss(x, segment_data)
-            print("LOSS", loss.item())
-            
-        segment_data["loss"] = tmp
 
         # remove learnable tokens
         y = y[:, local_config.no_leanable_tokens:, :]
@@ -327,6 +288,8 @@ class PixDiT_T2I(nn.Module):
         self.precompute_pos_txt = dict()
         self.last_repa_tokens = None
 
+        self.norm_learnable_token = RMSNorm(hidden_size, eps=1e-6)
+
         self.initialize_weights()
 
     def fetch_pos(self, height, width, device):
@@ -357,6 +320,48 @@ class PixDiT_T2I(nn.Module):
         nn.init.zeros_(self.final_layer.linear.weight)
         nn.init.zeros_(self.final_layer.linear.bias)
 
+    @staticmethod
+    def get_gt_bin(segment_data):
+        gt = segment_data["gt"]
+        label_ids = segment_data["label_ids"]
+        h, w = segment_data["hw"]
+
+        gt[gt == 255] = 0
+        gt_binary = torch.nn.functional.one_hot(gt[0].to(torch.int64), num_classes=21)
+        gt_binary = F.interpolate(gt_binary.permute(2,0,1).unsqueeze(0).to(torch.bfloat16), (h, w), mode="nearest")[0]
+        gt_binary =  einops.rearrange(gt_binary, "b h w -> b (h w)")
+        return torch.stack([gt_binary[lid] for lid in label_ids], dim=0)
+
+    def compute_loss(self, features, tokens, segment_data):
+        B, P, D = features.shape
+        gt_bin = PixDiT_T2I.get_gt_bin(segment_data).to(local_config.device)
+        # TODO
+        tokens = self.norm_learnable_token(tokens)
+        masks = features @ tokens.expand(B, -1, -1).permute(0, 2, 1)
+        merged_mask = masks.sum(dim=-1)
+        merged_mask = merged_mask.sigmoid()
+
+        intersection = (gt_bin * merged_mask).sum(dim=-1)
+        union = merged_mask.sum(dim=-1) + gt_bin.sum(dim=-1) - intersection
+        iou = (intersection + 1e-7) / (union + 1e-7)
+        # TODO: does this add less importance to examples with 2 classes per image than 1?
+        return 1.0 - iou.mean()
+
+    @staticmethod
+    def regularization_loss(tokens):
+        l2_penalty = tokens.pow(2).mean()
+        tokens = F.normalize(tokens, p=2, dim=-1)
+
+        # Pairwise cosine similarity
+        cos_dist = tokens @ tokens.transpose(-1, -2)
+        K = tokens.shape[-2]
+
+        # Remove diagonal without using bool negation
+        eye = torch.eye(K, device=tokens.device)
+        off_diag = 1.0 - eye
+        diversity_loss = (cos_dist.pow(2) * off_diag).sum() / (K * (K - 1))
+        return local_config.l2_regularization_weight * l2_penalty + local_config.diversity_regularization_weight * diversity_loss
+
     def forward(self, x, t, y, s=None, mask=None, segment_data=None):
         B, _, H, W = x.shape
         Hs = H // self.patch_size
@@ -375,11 +380,12 @@ class PixDiT_T2I(nn.Module):
         y_emb = self.y_embedder(y).view(B, Ltxt, self.hidden_size)
         y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
 
-
         condition = torch.nn.functional.silu(t_emb)
         if segment_data is not None:
             segment_data["mask"] = {}
             segment_data["hw"] = (Hs,Ws)
+            segment_data["loss"] = {}
+        
         if s is None:
             s0 = self.s_embedder(x_patches)
             pos_txt = self.fetch_pos_text(Ltxt, x.device) if self.use_text_rope else None
@@ -396,7 +402,7 @@ class PixDiT_T2I(nn.Module):
                     attn_mask_joint = torch.cat([pad[:, :Ltxt], pad_img], dim=1).view(B, 1, 1, Ltxt + L)
             self.last_repa_tokens = None
             s = s0
-            for i in range(self.patch_depth):
+            for i in range(min(self.patch_depth, local_config.layer_count)):
                 s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data)
                 if 0 < self.repa_encoder_index == (i + 1):
                     self.last_repa_tokens = s
@@ -409,9 +415,14 @@ class PixDiT_T2I(nn.Module):
 
                 if segment_data is not None:
                     segment_data["mask"][i] = attn_mk.view(B, Hs, Ws)
-                    if i == local_config.layer_count - 1:
-                        break
 
+            with torch.enable_grad():
+                tokens = torch.cat(
+                    [self.patch_blocks[i].learnable_token.weight for i in range(min(self.patch_depth, local_config.layer_count))]
+                )
+                loss = self.compute_loss(s, tokens, segment_data) + self.regularization_loss(tokens)
+                segment_data["loss_final"] = loss
+                print("loss", segment_data["loss_final"].item())
             s = torch.nn.functional.silu(t_emb + s)
         if not (0 < self.repa_encoder_index <= self.patch_depth):
             self.last_repa_tokens = s

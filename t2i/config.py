@@ -28,7 +28,7 @@ dataset_paths = {
     }
 }
 
-prompt_format = 'This picture should contain some objects in a scene and there should be a {target}.'
+prompt_format = 'This should be a realistic image. A scene with a {target} somewhere. The {target} can be close or far. It can be a small {target} or a large {target}. There is should be other stuff, for example: sky, vegetation, mutliple objects.'
 device = "cuda"
 eval_dataset = EvalDataset.VOC12
 current_ds_paths = dataset_paths[eval_dataset]
@@ -36,16 +36,20 @@ ds_config_path = current_ds_paths["json"]
 image_size = 512
 
 idx_token_of_interest = 0
-eval_samples_limit = 40
+eval_samples_limit = 1500
 target_layer = 0
-layer_count = 1
+layer_count = 3
 timestep = 0.002
-grad_accumulation = 3
-no_leanable_tokens = 30
+
+grad_accumulation = 10
+
+no_leanable_tokens = 50
+l2_regularization_weight = 1e-4
+diversity_regularization_weight = 1e-3
 
 run_on_extra_labels = False
 crop_size = True
 compute_model_vectors = False
 use_model_vectors = False
 # TODO: update
-save_learned_tokens = False
+save_learned_tokens = True

@@ -301,7 +301,7 @@ class Pix_Segmentor(torch.nn.Module):
         save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
         sio.savemat(save_path, cam_dict, do_compression=True)
         
-        return [{"sem_seg": predictions_all, "learnable_token_loss": segment_data["loss"]}]
+        return [{"sem_seg": predictions_all, "learnable_token_loss": segment_data["loss_final"]}]
     
     def forward(self, x):
         return self.forward_no_grad(x)
