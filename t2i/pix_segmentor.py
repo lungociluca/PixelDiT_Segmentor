@@ -135,7 +135,15 @@ class Pix_Segmentor(torch.nn.Module):
             self.prompts_dict = json.load(f)
         with open(local_config.ds_config_path) as f:
             self.labels = json.load(f)
+        self.emb, self.emb_mask, self.tokens_count = self.precompute_prompts()
+        
+        del self.tokenizer
+        del self.text_encoder
 
+    def precompute_prompts(self):
+        precomputed_embs = {}
+        prompts = [local_config.prompt_format.format(target=current_target) for current_target in self.labels]
+        return self.embed_condition(prompts)
 
     @staticmethod
     def img_id_from_path(x):
@@ -224,8 +232,12 @@ class Pix_Segmentor(torch.nn.Module):
         emb_masks = caption_token.attention_mask[:, select_index]
         return caption_embs, emb_masks, tokens_count
     
-    def run_diffusion_model(self, image, prompts, segment_data):
-        emb, emb_mask, tokens_count = self.embed_condition(prompts)
+    def run_diffusion_model(self, image, prompts, target_labels, segment_data):
+        label_indexes = [self.labels.index(target) for target in target_labels]
+        emb = torch.stack([self.emb[i] for i in label_indexes])
+        emb_mask = torch.stack([self.emb_mask[i] for i in label_indexes])
+        tokens_count = [self.tokens_count[i] for i in label_indexes]
+        # emb, emb_mask, tokens_count = self.embed_condition(prompts)
         model_kwargs = dict(data_info={"img_hw": image.shape[-2], "aspect_ratio": 1}, mask=emb_mask)
         segment_data["tokens_count"] = tokens_count
 
@@ -279,7 +291,7 @@ class Pix_Segmentor(torch.nn.Module):
             segment_data["gt"] = gt
             segment_data["label_ids"] = [self.labels.index(t) for t in target_labels]
 
-        self.run_diffusion_model(image_tensor, prompts, segment_data)
+        self.run_diffusion_model(image_tensor, prompts, target_labels, segment_data)
         assert segment_data["mask"][local_config.target_layer].shape[0] == len(prompts)
         prediction = segment_data["mask"][local_config.target_layer]
         
