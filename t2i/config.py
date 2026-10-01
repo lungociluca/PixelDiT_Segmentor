@@ -36,20 +36,22 @@ ds_config_path = current_ds_paths["json"]
 image_size = 512
 
 idx_token_of_interest = 0
-eval_samples_limit = 1500
+eval_samples_limit = 30
 target_layer = 0
 layer_count = 3
 timestep = 0.002
 
-grad_accumulation = 10
+grad_accumulation = 32
 
 no_leanable_tokens = 50
-l2_regularization_weight = 1e-4
-diversity_regularization_weight = 1e-3
+l2_regularization_weight = 0.
+diversity_regularization_weight = 0.
 
 run_on_extra_labels = False
 crop_size = True
 compute_model_vectors = False
 use_model_vectors = False
+
 # TODO: update
-save_learned_tokens = True
+save_learned_tokens = False
+use_learned_tokens = not save_learned_tokens

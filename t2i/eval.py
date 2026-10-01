@@ -195,7 +195,7 @@ class CustomTrainer(Trainer):
         trimmed_dataset = Subset(dataset, list(range(min(samples_count, len(dataset)))))
         trimmed_loader = DataLoader(
             trimmed_dataset,
-            batch_size=data_loader.batch_size,
+            batch_size=1,
             shuffle=False,  # Disable shuffle for trimmed data to preserve order
             num_workers=data_loader.num_workers,
             collate_fn=data_loader.collate_fn,

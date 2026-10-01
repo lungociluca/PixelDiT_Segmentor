@@ -17,6 +17,7 @@ from detectron2.utils.comm import get_world_size
 from detectron2.evaluation import inference_context
 from detectron2.utils.logger import log_every_n_seconds
 
+import config as local_config
 
 def inference_on_dataset(
     model,
@@ -403,16 +404,16 @@ def inference_on_dataset(
                 # ----------------------------------------------
                 # Backward
                 # ----------------------------------------------
+                if not local_config.use_learned_tokens:
+                    if using_fp16_scaler:
 
-                if using_fp16_scaler:
+                        scaler.scale(
+                            loss_for_backward
+                        ).backward()
 
-                    scaler.scale(
-                        loss_for_backward
-                    ).backward()
+                    else:
 
-                else:
-
-                    loss_for_backward.backward()
+                        loss_for_backward.backward()
 
                 micro_step += 1
 

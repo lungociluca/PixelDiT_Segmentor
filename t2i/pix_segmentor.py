@@ -306,8 +306,10 @@ class Pix_Segmentor(torch.nn.Module):
         for i, current_label in enumerate(target_labels):
             label_idx = self.labels.index(current_label) + 1
             predictions_all[label_idx-1] += prediction[i]
-
-            current_pred = min_max_norm(prediction[i].to(torch.float32))
+            if not local_config.use_learned_tokens:
+                current_pred = min_max_norm(prediction[i].to(torch.float32))
+            else:
+                current_pred = prediction[i].to(torch.float32)
             cam_dict[str(label_idx-1)] = (current_pred * 255).cpu().numpy()
 
         save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')

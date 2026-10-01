@@ -98,9 +98,11 @@ class MMDiTJointAttention(nn.Module):
         ky = self.k_norm_y(ky)
 
         my_norm = lambda x: x
-        target_tokens_y = torch.stack([ky[ii, [segment_data["tokens_count"][ii].item() - 1], :, :] for ii in range(B)], dim=0)
-        attn_mk = (my_norm(qx.permute(0,2,1,3)) @ target_tokens_y.permute(0,2,3,1)).mean(1).squeeze(-1)
-
+        if not local_config.use_learned_tokens:
+            target_tokens_y = torch.stack([ky[ii, [segment_data["tokens_count"][ii].item() - 1], :, :] for ii in range(B)], dim=0)
+            attn_mk = (my_norm(qx.permute(0,2,1,3)) @ target_tokens_y.permute(0,2,3,1)).mean(1).squeeze(-1)
+        else:
+            attn_mk = torch.zeros((B, Nx), device=x.device, dtype=x.dtype)
         qx, kx = apply_rotary_emb(qx, kx, freqs_cis=pos_img)
         if pos_txt is not None:
             qy, ky = apply_rotary_emb(qy, ky, freqs_cis=pos_txt)
@@ -152,7 +154,10 @@ class MMDiTBlockT2I(nn.Module):
         self.adaLN_modulation_txt = adaLN_modulation_txt if adaLN_modulation_txt is not None else nn.Sequential(nn.Linear(hidden_size, 6 * hidden_size, bias=True))
 
         self.block_id = block_id
-        self.learnable_token = nn.Embedding(local_config.no_leanable_tokens, hidden_size)
+        if local_config.use_learned_tokens:
+            self.learnable_token = torch.load(f"learnable_token_{self.block_id}.pt", weights_only=False)
+        else:
+            self.learnable_token = nn.Embedding(local_config.no_leanable_tokens, hidden_size)
 
     # def gather_features(self, features, segment_data):
     #     B, P, D = features.shape
@@ -186,6 +191,8 @@ class MMDiTBlockT2I(nn.Module):
             attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data)
 
         # remove learnable tokens
+        segment_data["learned"] = y[:, :local_config.no_leanable_tokens, :] + gate_msa_y * segment_data["learned"]
+        segment_data["learned"] = segment_data["learned"] + gate_mlp_y * self.mlp_y(apply_adaln(self.norm_y2(segment_data["learned"]), shift_mlp_y, scale_mlp_y))
         y = y[:, local_config.no_leanable_tokens:, :]
 
         x = x + gate_msa_x * attn_x
@@ -289,6 +296,8 @@ class PixDiT_T2I(nn.Module):
         self.last_repa_tokens = None
 
         self.norm_learnable_token = RMSNorm(hidden_size, eps=1e-6)
+        if local_config.use_learned_tokens:
+            self.norm_learnable_token.load_state_dict(torch.load("norm.pt", weights_only=True))
 
         self.initialize_weights()
 
@@ -330,21 +339,53 @@ class PixDiT_T2I(nn.Module):
         gt_binary = torch.nn.functional.one_hot(gt[0].to(torch.int64), num_classes=21)
         gt_binary = F.interpolate(gt_binary.permute(2,0,1).unsqueeze(0).to(torch.bfloat16), (h, w), mode="nearest")[0]
         gt_binary =  einops.rearrange(gt_binary, "b h w -> b (h w)")
-        return torch.stack([gt_binary[lid] for lid in label_ids], dim=0)
+        return torch.stack([gt_binary[lid+1] for lid in label_ids], dim=0)
+
+    def compute_masks(self, features, tokens):
+        B, L, P, D = features.shape
+        tokens = self.norm_learnable_token(tokens)
+        masks = features @ tokens[None, :, :, :].expand(B, -1, -1, -1).permute(0, 1, 3, 2)
+        merged_mask = masks.sum(dim=-1).sum(dim=1) # sum on layers dimension and no.tokens dimension
+        merged_mask = merged_mask.sigmoid()
+        return merged_mask
 
     def compute_loss(self, features, tokens, segment_data):
-        B, P, D = features.shape
+        B, L, P, D = features.shape
         gt_bin = PixDiT_T2I.get_gt_bin(segment_data).to(local_config.device)
-        # TODO
-        tokens = self.norm_learnable_token(tokens)
-        masks = features @ tokens.expand(B, -1, -1).permute(0, 2, 1)
-        merged_mask = masks.sum(dim=-1)
-        merged_mask = merged_mask.sigmoid()
+
+        merged_mask = self.compute_masks(features, tokens)
+
+
+
+
+        # import matplotlib.pyplot as plt
+        # import os
+
+        # with torch.no_grad():
+        #     h, w = segment_data["hw"]
+        #     for ii in range(gt_bin.shape[0]):
+        #         pred = merged_mask[ii].detach().float().cpu().view(h,w)
+        #         gt = gt_bin[ii].detach().float().cpu().view(h,w)
+
+        #         fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+
+        #         axes[0].imshow(pred, cmap="hot")
+        #         axes[0].set_title("merged_mask")
+        #         axes[0].axis("off")
+
+        #         axes[1].imshow(gt, cmap="hot",)
+        #         axes[1].set_title("gt_bin")
+        #         axes[1].axis("off")
+
+        #         plt.tight_layout()
+        #         plt.savefig(f"trash/{len(os.listdir('trash'))}.jpg")
+        #         plt.close(fig)
+
+
 
         intersection = (gt_bin * merged_mask).sum(dim=-1)
         union = merged_mask.sum(dim=-1) + gt_bin.sum(dim=-1) - intersection
         iou = (intersection + 1e-7) / (union + 1e-7)
-        # TODO: does this add less importance to examples with 2 classes per image than 1?
         return 1.0 - iou.mean()
 
     @staticmethod
@@ -402,8 +443,10 @@ class PixDiT_T2I(nn.Module):
                     attn_mask_joint = torch.cat([pad[:, :Ltxt], pad_img], dim=1).view(B, 1, 1, Ltxt + L)
             self.last_repa_tokens = None
             s = s0
+            s_layers = torch.zeros((s0.shape[-3], min(self.patch_depth, local_config.layer_count), s0.shape[-2], s0.shape[-1]), device=local_config.device, dtype=torch.bfloat16)
             for i in range(min(self.patch_depth, local_config.layer_count)):
                 s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data)
+                s_layers[:,i] += s
                 if 0 < self.repa_encoder_index == (i + 1):
                     self.last_repa_tokens = s
                 
@@ -417,12 +460,15 @@ class PixDiT_T2I(nn.Module):
                     segment_data["mask"][i] = attn_mk.view(B, Hs, Ws)
 
             with torch.enable_grad():
-                tokens = torch.cat(
-                    [self.patch_blocks[i].learnable_token.weight for i in range(min(self.patch_depth, local_config.layer_count))]
+                tokens = torch.stack(
+                    [self.patch_blocks[i].learnable_token.weight for i in range(min(self.patch_depth, local_config.layer_count))],
+                    dim=0
                 )
-                loss = self.compute_loss(s, tokens, segment_data) + self.regularization_loss(tokens)
+                loss = self.compute_loss(s_layers, tokens, segment_data) + self.regularization_loss(tokens)
                 segment_data["loss_final"] = loss
                 print("loss", segment_data["loss_final"].item())
+                if local_config.use_learned_tokens:
+                    segment_data["mask"][local_config.target_layer] = self.compute_masks(s_layers, tokens).view(B, Hs, Ws)
             s = torch.nn.functional.silu(t_emb + s)
         if not (0 < self.repa_encoder_index <= self.patch_depth):
             self.last_repa_tokens = s
@@ -448,3 +494,7 @@ class PixDiT_T2I(nn.Module):
         x_pixels = x_pixels.view(B, C_out * P2, L)
         x_img = torch.nn.functional.fold(x_pixels, (H, W), kernel_size=self.patch_size, stride=self.patch_size)
         return x_img
+
+    def __del__(self):
+        if local_config.save_learned_tokens:
+            torch.save(self.norm_learnable_token.state_dict(), "norm.pt")
