@@ -28,7 +28,11 @@ dataset_paths = {
     }
 }
 
-prompt_format = 'This should be a realistic image. A scene with a {target} somewhere. The {target} can be close or far. It can be a small {target} or a large {target}. There is should be other stuff, for example: sky, vegetation, mutliple objects.'
+tmp = """
+small or large [TARGET]; near or distant [TARGET]; visible, partially visible, occluded, or truncated [TARGET]; isolated, overlapping, or crowded [TARGET]; [TARGET] defined by its overall shape; [TARGET] defined by its distinctive parts; [TARGET] defined by its visual appearance, texture, or material; [TARGET] defined by its local boundaries and separation from surrounding regions.
+"""
+
+prompt_format = 'This should be a realistic image. A scene with a {target} somewhere. The {target} can be close or far. It can be a small {target} or a large {target}. There should be other stuff, for example: sky, vegetation, mutliple objects.'
 device = "cuda"
 eval_dataset = EvalDataset.VOC12
 current_ds_paths = dataset_paths[eval_dataset]
@@ -36,18 +40,19 @@ ds_config_path = current_ds_paths["json"]
 image_size = 512
 
 idx_token_of_interest = 0
-eval_samples_limit = 30
+eval_samples_limit = 3
 target_layer = 0
-layer_count = 3
+layer_count = 1
 timestep = 0.002
+extra_labels_count = 3
 
-grad_accumulation = 32
+grad_accumulation = 16
 
-no_leanable_tokens = 50
+no_leanable_tokens = 100
 l2_regularization_weight = 0.
 diversity_regularization_weight = 0.
 
-run_on_extra_labels = False
+run_on_extra_labels = True
 crop_size = True
 compute_model_vectors = False
 use_model_vectors = False

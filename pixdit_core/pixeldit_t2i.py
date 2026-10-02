@@ -78,7 +78,7 @@ class MMDiTJointAttention(nn.Module):
         out_y_learned = out_joint_learned.transpose(1, 2).reshape(B, local_config.no_leanable_tokens, C)
         # TODO: implement dropout
         out_y_learned = self.proj_y(out_y_learned)
-        segment_data["learned"] = out_y_learned
+        segment_data["learned"][self.block_id] = out_y_learned
 
         # remove learnable tokens after they attented with prompt tokens
         y = y[:, local_config.no_leanable_tokens:, :]
@@ -128,6 +128,8 @@ class MMDiTJointAttention(nn.Module):
 
         out_x = self.proj_drop_x(self.proj_x(out_x))
         out_y = self.proj_drop_y(self.proj_y(out_y))
+
+        segment_data["target_s"][self.block_id] = out_x.clone()
         return out_x, out_y, attn_mk
 
 class MMDiTBlockT2I(nn.Module):
@@ -185,14 +187,11 @@ class MMDiTBlockT2I(nn.Module):
         # add learnable tokens
         with torch.enable_grad():
             y = torch.cat([self.learnable_token.weight.expand(y.shape[0], -1, -1), y], dim=1)
-            # y = torch.cat([torch.load("learnable_token_0.pt", weights_only=False).to("cuda").to(torch.bfloat16).weight.expand(y.shape[0], -1, -1), y], dim=1)
             x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
             y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
             attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data)
 
         # remove learnable tokens
-        segment_data["learned"] = y[:, :local_config.no_leanable_tokens, :] + gate_msa_y * segment_data["learned"]
-        segment_data["learned"] = segment_data["learned"] + gate_mlp_y * self.mlp_y(apply_adaln(self.norm_y2(segment_data["learned"]), shift_mlp_y, scale_mlp_y))
         y = y[:, local_config.no_leanable_tokens:, :]
 
         x = x + gate_msa_x * attn_x
@@ -343,8 +342,10 @@ class PixDiT_T2I(nn.Module):
 
     def compute_masks(self, features, tokens):
         B, L, P, D = features.shape
-        tokens = self.norm_learnable_token(tokens)
-        masks = features @ tokens[None, :, :, :].expand(B, -1, -1, -1).permute(0, 1, 3, 2)
+        # tokens = self.norm_learnable_token(tokens)
+        my_norm = lambda x: torch.nn.functional.normalize(x, dim=-1)
+        masks = my_norm(features) @ my_norm(tokens).permute(1, 0, 3, 2)
+        masks = masks.tanh()
         merged_mask = masks.sum(dim=-1).sum(dim=1) # sum on layers dimension and no.tokens dimension
         merged_mask = merged_mask.sigmoid()
         return merged_mask
@@ -426,6 +427,8 @@ class PixDiT_T2I(nn.Module):
             segment_data["mask"] = {}
             segment_data["hw"] = (Hs,Ws)
             segment_data["loss"] = {}
+            segment_data["learned"] = {}
+            segment_data["target_s"] = {}
         
         if s is None:
             s0 = self.s_embedder(x_patches)
@@ -444,28 +447,29 @@ class PixDiT_T2I(nn.Module):
             self.last_repa_tokens = None
             s = s0
             s_layers = torch.zeros((s0.shape[-3], min(self.patch_depth, local_config.layer_count), s0.shape[-2], s0.shape[-1]), device=local_config.device, dtype=torch.bfloat16)
-            for i in range(min(self.patch_depth, local_config.layer_count)):
-                s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data)
-                s_layers[:,i] += s
-                if 0 < self.repa_encoder_index == (i + 1):
-                    self.last_repa_tokens = s
-                
-                # import os
-                # attn_mk_disp = attn_mk.to(torch.float32)[-1,:].view(Hs, Ws).detach().cpu()
-                # plt.imshow(attn_mk_disp, cmap="viridis")
-                # plt.savefig(f"trash/{i}_{len(os.listdir('trash'))}.png")
-                # plt.close()
-
-                if segment_data is not None:
-                    segment_data["mask"][i] = attn_mk.view(B, Hs, Ws)
 
             with torch.enable_grad():
+                for i in range(min(self.patch_depth, local_config.layer_count)):
+                    s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data)
+                    s_layers[:,i] += segment_data["target_s"][i]
+                    if 0 < self.repa_encoder_index == (i + 1):
+                        self.last_repa_tokens = s
+                    
+                    # import os
+                    # attn_mk_disp = attn_mk.to(torch.float32)[-1,:].view(Hs, Ws).detach().cpu()
+                    # plt.imshow(attn_mk_disp, cmap="viridis")
+                    # plt.savefig(f"trash/{i}_{len(os.listdir('trash'))}.png")
+                    # plt.close()
+
+                    if segment_data is not None:
+                        segment_data["mask"][i] = attn_mk.view(B, Hs, Ws)
+
                 tokens = torch.stack(
-                    [self.patch_blocks[i].learnable_token.weight for i in range(min(self.patch_depth, local_config.layer_count))],
+                    [segment_data["learned"][i] for i in range(min(self.patch_depth, local_config.layer_count))],
                     dim=0
                 )
                 loss = self.compute_loss(s_layers, tokens, segment_data) + self.regularization_loss(tokens)
-                segment_data["loss_final"] = loss
+                segment_data["loss_final"] = loss # TODO
                 print("loss", segment_data["loss_final"].item())
                 if local_config.use_learned_tokens:
                     segment_data["mask"][local_config.target_layer] = self.compute_masks(s_layers, tokens).view(B, Hs, Ws)

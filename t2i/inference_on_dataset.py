@@ -117,6 +117,7 @@ def inference_on_dataset(
     # Validation
     # ============================================================
 
+    loss_logs = open("loss_logs.txt", "w")
     if gradient_accumulation_steps < 1:
         raise ValueError(
             "gradient_accumulation_steps must be >= 1"
@@ -580,6 +581,7 @@ def inference_on_dataset(
                     if not optimizer_step_was_skipped:
                         optimizer_step += 1
 
+                    loss_logs.write(f"{accumulated_loss}\n")
                     micro_step = 0
                     accumulated_loss = 0.0
 
@@ -790,4 +792,5 @@ def inference_on_dataset(
     if results is None:
         results = {}
 
+    loss_logs.close()
     return results

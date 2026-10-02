@@ -207,7 +207,7 @@ class Pix_Segmentor(torch.nn.Module):
         return torch.nn.functional.pad(prediction, padding, mode="constant", value=0)
 
     def add_extra_labels(self, gt_labels):
-        extra_labels_count = 2
+        extra_labels_count = local_config.extra_labels_count
         all_extra_labels = [x for x in self.labels if x not in gt_labels]
         samples_extra_labels = random.sample(all_extra_labels, extra_labels_count)
         return gt_labels + samples_extra_labels 
@@ -234,8 +234,8 @@ class Pix_Segmentor(torch.nn.Module):
     
     def run_diffusion_model(self, image, prompts, target_labels, segment_data):
         label_indexes = [self.labels.index(target) for target in target_labels]
-        emb = torch.stack([self.emb[i] for i in label_indexes])
-        emb_mask = torch.stack([self.emb_mask[i] for i in label_indexes])
+        emb = torch.stack([self.emb[i] for i in label_indexes], dim=0)
+        emb_mask = torch.stack([self.emb_mask[i] for i in label_indexes], dim=0)
         tokens_count = [self.tokens_count[i] for i in label_indexes]
         # emb, emb_mask, tokens_count = self.embed_condition(prompts)
         model_kwargs = dict(data_info={"img_hw": image.shape[-2], "aspect_ratio": 1}, mask=emb_mask)
