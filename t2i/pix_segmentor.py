@@ -301,19 +301,20 @@ class Pix_Segmentor(torch.nn.Module):
         prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
         predictions_all = torch.zeros((len(self.labels)+1), h, w).to(prediction.device)
 
-        cam_dict = {}
-        min_max_norm = lambda x: (x - x.min()) / (x.max() - x.min())
-        for i, current_label in enumerate(target_labels):
-            label_idx = self.labels.index(current_label) + 1
-            predictions_all[label_idx-1] += prediction[i]
-            if not local_config.use_learned_tokens:
-                current_pred = min_max_norm(prediction[i].to(torch.float32))
-            else:
-                current_pred = prediction[i].to(torch.float32)
-            cam_dict[str(label_idx-1)] = (current_pred * 255).cpu().numpy()
+        if local_config.use_learned_tokens:
+            cam_dict = {}
+            min_max_norm = lambda x: (x - x.min()) / (x.max() - x.min())
+            for i, current_label in enumerate(target_labels):
+                label_idx = self.labels.index(current_label) + 1
+                predictions_all[label_idx-1] += prediction[i]
+                if not local_config.use_learned_tokens:
+                    current_pred = min_max_norm(prediction[i].to(torch.float32))
+                else:
+                    current_pred = prediction[i].to(torch.float32)
+                cam_dict[str(label_idx-1)] = (current_pred * 255).cpu().numpy()
 
-        save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
-        sio.savemat(save_path, cam_dict, do_compression=True)
+            save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
+            sio.savemat(save_path, cam_dict, do_compression=True)
         
         return [{"sem_seg": predictions_all, "learnable_token_loss": segment_data["loss_final"]}]
     

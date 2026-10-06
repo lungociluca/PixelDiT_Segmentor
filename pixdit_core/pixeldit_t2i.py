@@ -362,25 +362,26 @@ class PixDiT_T2I(nn.Module):
         # import matplotlib.pyplot as plt
         # import os
 
-        # with torch.no_grad():
-        #     h, w = segment_data["hw"]
-        #     for ii in range(gt_bin.shape[0]):
-        #         pred = merged_mask[ii].detach().float().cpu().view(h,w)
-        #         gt = gt_bin[ii].detach().float().cpu().view(h,w)
+        # if os.path.isfile("print"):
+        #     with torch.no_grad():
+        #         h, w = segment_data["hw"]
+        #         for ii in range(gt_bin.shape[0]):
+        #             pred = merged_mask[ii].detach().float().cpu().view(h,w)
+        #             gt = gt_bin[ii].detach().float().cpu().view(h,w)
 
-        #         fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+        #             fig, axes = plt.subplots(1, 2, figsize=(10, 5))
 
-        #         axes[0].imshow(pred, cmap="hot")
-        #         axes[0].set_title("merged_mask")
-        #         axes[0].axis("off")
+        #             axes[0].imshow(pred, cmap="hot")
+        #             axes[0].set_title("merged_mask")
+        #             axes[0].axis("off")
 
-        #         axes[1].imshow(gt, cmap="hot",)
-        #         axes[1].set_title("gt_bin")
-        #         axes[1].axis("off")
+        #             axes[1].imshow(gt, cmap="hot",)
+        #             axes[1].set_title("gt_bin")
+        #             axes[1].axis("off")
 
-        #         plt.tight_layout()
-        #         plt.savefig(f"trash/{len(os.listdir('trash'))}.jpg")
-        #         plt.close(fig)
+        #             plt.tight_layout()
+        #             plt.savefig(f"trash/{len(os.listdir('trash'))}.jpg")
+        #             plt.close(fig)
 
 
 
@@ -470,7 +471,6 @@ class PixDiT_T2I(nn.Module):
                 )
                 loss = self.compute_loss(s_layers, tokens, segment_data) + self.regularization_loss(tokens)
                 segment_data["loss_final"] = loss # TODO
-                print("loss", segment_data["loss_final"].item())
                 if local_config.use_learned_tokens:
                     segment_data["mask"][local_config.target_layer] = self.compute_masks(s_layers, tokens).view(B, Hs, Ws)
             s = torch.nn.functional.silu(t_emb + s)

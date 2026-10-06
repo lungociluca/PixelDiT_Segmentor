@@ -101,8 +101,8 @@ class Trainer(DefaultTrainer):
         # TODO
         optimizer = torch.optim.AdamW(
             token_params,
-            lr=1e-4,
-            weight_decay=0.05,
+            lr=local_config.lr,
+            # weight_decay=0.05,
         )
 
         return optimizer
@@ -196,7 +196,7 @@ class CustomTrainer(Trainer):
         trimmed_loader = DataLoader(
             trimmed_dataset,
             batch_size=1,
-            shuffle=False,  # Disable shuffle for trimmed data to preserve order
+            shuffle=True,
             num_workers=data_loader.num_workers,
             collate_fn=data_loader.collate_fn,
             pin_memory=data_loader.pin_memory,
@@ -235,11 +235,11 @@ class CustomTrainer(Trainer):
             # implicitly assume that evaluators can be created before data_loader.
             optimizer = cls.build_optimizer(model)
 
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=math.ceil(len(data_loader) / local_config.grad_accumulation),
-                eta_min=1e-4,
-            )
+            # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            #     optimizer,
+            #     T_max=math.ceil(len(data_loader) / local_config.grad_accumulation),
+            #     eta_min=1e-4,
+            # )
 
             if evaluators is not None:
                 evaluator = evaluators[idx]
@@ -254,7 +254,7 @@ class CustomTrainer(Trainer):
                     results[dataset_name] = {}
                     continue
             results_i = inference_on_dataset(model, data_loader, evaluator,
-                optimizer=optimizer, gradient_accumulation_steps=local_config.grad_accumulation)
+                optimizer=optimizer if local_config.save_learned_tokens else None, gradient_accumulation_steps=local_config.grad_accumulation)
             results[dataset_name] = results_i
             if comm.is_main_process():
                 assert isinstance(
