@@ -39,16 +39,18 @@ current_ds_paths = dataset_paths[eval_dataset]
 ds_config_path = current_ds_paths["json"]
 image_size = 512
 
+epochs = 1
+lr = 1e-3
 idx_token_of_interest = 0
-eval_samples_limit = 3
+eval_samples_limit = 30
 target_layer = 0
 layer_count = 1
 timestep = 0.002
-extra_labels_count = 3
+extra_labels_count = 2
 
 grad_accumulation = 16
 
-no_leanable_tokens = 100
+no_leanable_tokens = 200
 l2_regularization_weight = 0.
 diversity_regularization_weight = 0.
 

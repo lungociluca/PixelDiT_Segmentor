@@ -74,7 +74,11 @@ class MMDiTJointAttention(nn.Module):
         qy_learned = qy_learned.transpose(1, 2)
         ky_learned = ky_learned.transpose(1, 2)
         vy_learned = vy_learned.transpose(1, 2)
-        out_joint_learned = F.scaled_dot_product_attention(qy_learned, ky_learned, vy_learned, dropout_p=0.0)[:,:,:local_config.no_leanable_tokens,:]
+
+        attention_bias = torch.ones((pos_emb_size, pos_emb_size), dtype=torch.bool, device=local_config.device)
+        attention_bias[:, :local_config.no_leanable_tokens] = False
+        out_joint_learned = F.scaled_dot_product_attention(qy_learned, ky_learned, vy_learned, dropout_p=0.0, attn_mask=attention_bias)[:,:,:local_config.no_leanable_tokens,:]
+        
         out_y_learned = out_joint_learned.transpose(1, 2).reshape(B, local_config.no_leanable_tokens, C)
         # TODO: implement dropout
         out_y_learned = self.proj_y(out_y_learned)
