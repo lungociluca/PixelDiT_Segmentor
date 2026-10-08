@@ -283,6 +283,7 @@ def inference_on_dataset(
         # Main loop
         # ========================================================
         for ep in range(local_config.epochs):
+            print("ep", ep)
             for idx, inputs in enumerate(data_loader):
                 print(idx)
                 # FIX: global step index across all epochs. Drives warmup,
@@ -478,7 +479,7 @@ def inference_on_dataset(
                     )
 
                     if should_step:
-
+                        print("loss", round(accumulated_loss, 4))
                         callback(
                             "before_optimizer_step",
                             optimizer_step=optimizer_step,
@@ -568,7 +569,6 @@ def inference_on_dataset(
                         # Optimizer step
                         # --------------------------------------------
 
-                        print("stepping")
                         if using_fp16_scaler:
 
                             old_scale = scaler.get_scale()

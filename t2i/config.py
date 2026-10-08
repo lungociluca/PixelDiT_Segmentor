@@ -40,21 +40,21 @@ ds_config_path = current_ds_paths["json"]
 image_size = 512
 
 epochs = 1
-lr = 1e-3
+lr = 1e-4
 idx_token_of_interest = 0
-eval_samples_limit = 30
+eval_samples_limit = 1500
 target_layer = 0
-layer_count = 1
+layer_count = 3
 timestep = 0.002
 extra_labels_count = 2
 
-grad_accumulation = 16
+grad_accumulation = 128
 
-no_leanable_tokens = 200
+no_leanable_tokens = 128
 l2_regularization_weight = 0.
 diversity_regularization_weight = 0.
 
-run_on_extra_labels = True
+run_on_extra_labels = False
 crop_size = True
 compute_model_vectors = False
 use_model_vectors = False
