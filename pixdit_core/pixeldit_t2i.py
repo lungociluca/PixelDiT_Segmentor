@@ -51,26 +51,31 @@ class MMDiTJointAttention(nn.Module):
         self.proj_drop_y = nn.Dropout(proj_drop)
         self.block_id = block_id
 
-        self.learnable_token_vision_mlp = torch.nn.Sequential(
-            torch.nn.Linear(dim, dim),
-            torch.nn.Tanh(),
-            torch.nn.Linear(dim, dim),
-            torch.nn.Tanh(),
-            torch.nn.Linear(dim,dim)
-        )
-        self.learnable_token_text_mlp = torch.nn.Sequential(
-            torch.nn.Linear(dim, dim),
-            torch.nn.Tanh(),
-            torch.nn.Linear(dim, dim),
-            torch.nn.Tanh(),
-            torch.nn.Linear(dim,dim)
-        )
+        if local_config.use_vision_mlp:
+            self.learnable_token_vision_mlp = torch.nn.Sequential(
+                torch.nn.Linear(dim, dim),
+                torch.nn.Tanh(),
+                torch.nn.Linear(dim, dim),
+                torch.nn.Tanh(),
+                torch.nn.Linear(dim,dim)
+            )
+        
+        if local_config.use_text_mlp:
+            self.learnable_token_text_mlp = torch.nn.Sequential(
+                torch.nn.Linear(dim, dim),
+                torch.nn.Tanh(),
+                torch.nn.Linear(dim, dim),
+                torch.nn.Tanh(),
+                torch.nn.Linear(dim,dim)
+            )
 
         if local_config.use_learned_tokens:
-            vision_state = torch.load(f"learnable_token_vision_mlp_{self.block_id}.pt", map_location=local_config.device)
-            self.learnable_token_vision_mlp.load_state_dict(vision_state)
-            text_state = torch.load(f"learnable_token_text_mlp_{self.block_id}.pt", map_location=local_config.device)
-            self.learnable_token_text_mlp.load_state_dict(text_state)
+            if local_config.use_vision_mlp:
+                vision_state = torch.load(f"learnable_token_vision_mlp_{self.block_id}.pt", map_location=local_config.device)
+                self.learnable_token_vision_mlp.load_state_dict(vision_state)
+            if local_config.use_text_mlp:
+                text_state = torch.load(f"learnable_token_text_mlp_{self.block_id}.pt", map_location=local_config.device)
+                self.learnable_token_text_mlp.load_state_dict(text_state)
 
         with open(local_config.ds_config_path) as f:
             self.labels = json.load(f)
@@ -96,14 +101,21 @@ class MMDiTJointAttention(nn.Module):
         ky_learned = ky_learned.transpose(1, 2)
         vy_learned = vy_learned.transpose(1, 2)
 
-        attention_bias = torch.ones((pos_emb_size, pos_emb_size), dtype=torch.bool, device=local_config.device)
-        attention_bias[:, :local_config.no_leanable_tokens] = False
+        if local_config.use_attention_bias:
+            attention_bias = torch.ones((pos_emb_size, pos_emb_size), dtype=torch.bool, device=local_config.device)
+            attention_bias[:, :local_config.no_leanable_tokens] = False
+        else:
+            attention_bias = None
         out_joint_learned = F.scaled_dot_product_attention(qy_learned, ky_learned, vy_learned, dropout_p=0.0, attn_mask=attention_bias)[:,:,:local_config.no_leanable_tokens,:]
         
         out_y_learned = out_joint_learned.transpose(1, 2).reshape(B, local_config.no_leanable_tokens, C)
         # TODO: implement dropout
         my_norm = lambda x: torch.nn.functional.normalize(x, dim=-1)
-        out_y_learned = self.learnable_token_text_mlp(my_norm(out_y_learned))
+        
+        out_y_learned = self.proj_y(out_y_learned)
+        out_y_learned = my_norm(out_y_learned)
+        if local_config.use_text_mlp:
+            out_y_learned = self.learnable_token_text_mlp(out_y_learned)
         segment_data["learned"][self.block_id] = out_y_learned
 
         # remove learnable tokens after they attented with prompt tokens
@@ -152,7 +164,11 @@ class MMDiTJointAttention(nn.Module):
         out_y = out_y.transpose(1, 2).reshape(B, Ny, C)
         out_x = out_x.transpose(1, 2).reshape(B, Nx, C)
 
-        segment_data["target_s"][self.block_id] = self.learnable_token_vision_mlp(my_norm(out_x.clone()))
+        out_x_learned = self.proj_x(out_x.clone())
+        out_x_learned = my_norm(out_x_learned)
+        if local_config.use_vision_mlp:
+            out_x_learned = self.learnable_token_vision_mlp(out_x_learned)
+        segment_data["target_s"][self.block_id] = out_x_learned
 
         out_x = self.proj_drop_x(self.proj_x(out_x))
         out_y = self.proj_drop_y(self.proj_y(out_y))
@@ -161,8 +177,10 @@ class MMDiTJointAttention(nn.Module):
 
     def __del__(self):
         if local_config.save_learned_tokens:
-            torch.save(self.learnable_token_vision_mlp.state_dict(), f"learnable_token_vision_mlp_{self.block_id}.pt")
-            torch.save(self.learnable_token_text_mlp.state_dict(), f"learnable_token_text_mlp_{self.block_id}.pt")
+            if local_config.use_vision_mlp:
+                torch.save(self.learnable_token_vision_mlp.state_dict(), f"learnable_token_vision_mlp_{self.block_id}.pt")
+            if local_config.use_text_mlp:
+                torch.save(self.learnable_token_text_mlp.state_dict(), f"learnable_token_text_mlp_{self.block_id}.pt")
 
 class MMDiTBlockT2I(nn.Module):
     def __init__(self, hidden_size, groups, mlp_ratio=4.0, adaLN_modulation_img=None, adaLN_modulation_txt=None, block_id=-1):

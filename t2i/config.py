@@ -42,19 +42,23 @@ image_size = 512
 epochs = 1
 lr = 1e-4
 idx_token_of_interest = 0
-eval_samples_limit = 1500
+eval_samples_limit = 16
 target_layer = 0
-layer_count = 3
+layer_count = 1
 timestep = 0.002
 extra_labels_count = 2
 
-grad_accumulation = 128
+grad_accumulation = 16
 
-no_leanable_tokens = 128
+no_leanable_tokens = 200
 l2_regularization_weight = 0.
 diversity_regularization_weight = 0.
 
 run_on_extra_labels = False
+use_attention_bias = True
+use_vision_mlp = True
+use_text_mlp = False
+
 crop_size = True
 compute_model_vectors = False
 use_model_vectors = False

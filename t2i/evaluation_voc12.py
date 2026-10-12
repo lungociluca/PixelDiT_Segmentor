@@ -179,7 +179,6 @@ class Args:
     val_split = 1.
     comment='train1464'
     curve=True
-    end=99
     base_dir = 'sio_maps'
     image_dir = os.path.join(base_dir,'images')
     cam_npy_dir = os.path.join(base_dir, 'images')
@@ -188,7 +187,9 @@ class Args:
     # list='/root/autodl-tmp/wjl/ptp_diffusion/voc12/train_aug_id.txt'
     logfile=os.path.join(base_dir,'eval.txt')
     num_classes=21
-    start=1
+    start=0
+    end=61
+    step=2
     t=None
     type='npy'
     sample_images=True
@@ -223,7 +224,7 @@ def test():
         max_mIoU = 0.0
         best_thr = 0.0
         print(f"Finding threshold on a data split of {len(val_name_list)}")
-        for i in range(args.start, args.end):
+        for i in range(args.start, args.end, args.step):
             t = i/100.0
             loglist = do_python_eval(args.cam_npy_dir, args.gt_dir, val_name_list, args.num_classes, args.type, t)
             l.append(loglist['mIoU'])
