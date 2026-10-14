@@ -102,7 +102,7 @@ class Trainer(DefaultTrainer):
         optimizer = torch.optim.AdamW(
             token_params,
             lr=local_config.lr,
-            # weight_decay=0.05,
+            weight_decay=0.05,
         )
 
         return optimizer
@@ -192,11 +192,11 @@ class CustomTrainer(Trainer):
     @staticmethod
     def trim_data_loader(data_loader: DataLoader, samples_count: int):
         dataset = data_loader.dataset
-        trimmed_dataset = Subset(dataset, list(range(min(samples_count, len(dataset)))))
+        trimmed_dataset = Subset(dataset, [0])
         trimmed_loader = DataLoader(
             trimmed_dataset,
             batch_size=1,
-            shuffle=True,
+            shuffle=local_config.shuffle,
             num_workers=data_loader.num_workers,
             collate_fn=data_loader.collate_fn,
             pin_memory=data_loader.pin_memory,

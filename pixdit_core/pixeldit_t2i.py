@@ -69,6 +69,20 @@ class MMDiTJointAttention(nn.Module):
                 torch.nn.Linear(dim,dim)
             )
 
+        self.learnable_token_weight_vision_mlp = torch.nn.Sequential(
+                torch.nn.Linear(2 * dim, dim),
+                torch.nn.Tanh(),
+                torch.nn.Linear(dim, dim // 2),
+                torch.nn.Tanh(),
+                torch.nn.Linear(dim // 2, 1),
+                torch.nn.Tanh()
+            )
+
+        if local_config.use_learned_tokens:
+            self.learnable_token_vision = torch.load(f"learnable_token_vision_{self.block_id}.pt", weights_only=False)
+        else:
+            self.learnable_token_vision = nn.Embedding(local_config.no_vision_learnable_tokens, dim)
+        
         if local_config.use_learned_tokens:
             if local_config.use_vision_mlp:
                 vision_state = torch.load(f"learnable_token_vision_mlp_{self.block_id}.pt", map_location=local_config.device)
@@ -76,7 +90,10 @@ class MMDiTJointAttention(nn.Module):
             if local_config.use_text_mlp:
                 text_state = torch.load(f"learnable_token_text_mlp_{self.block_id}.pt", map_location=local_config.device)
                 self.learnable_token_text_mlp.load_state_dict(text_state)
-
+            
+            weight_vision_state = torch.load(f"learnable_token_weight_vision_mlp_{self.block_id}.pt", map_location=local_config.device)
+            self.learnable_token_weight_vision_mlp.load_state_dict(weight_vision_state)
+        
         with open(local_config.ds_config_path) as f:
             self.labels = json.load(f)
 
@@ -113,13 +130,46 @@ class MMDiTJointAttention(nn.Module):
         my_norm = lambda x: torch.nn.functional.normalize(x, dim=-1)
         
         out_y_learned = self.proj_y(out_y_learned)
-        out_y_learned = my_norm(out_y_learned)
+        # TODO
+        # out_y_learned = my_norm(out_y_learned) 
         if local_config.use_text_mlp:
             out_y_learned = self.learnable_token_text_mlp(out_y_learned)
-        segment_data["learned"][self.block_id] = out_y_learned
+        # segment_data["learned"][self.block_id] = out_y_learned
 
         # remove learnable tokens after they attented with prompt tokens
         y = y[:, local_config.no_leanable_tokens:, :]
+
+
+        ####################################################################################################
+        all_vision_tokens_count = x.shape[1] + local_config.no_vision_learnable_tokens
+        qkv_x_l = self.qkv_x(
+            torch.cat([self.learnable_token_vision.weight.expand(B, -1, -1), x], dim=1)
+        ).reshape(B, all_vision_tokens_count, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
+        qxl, kxl, vxl = qkv_x_l[0], qkv_x_l[1], qkv_x_l[2]
+        qxl = self.q_norm_x(qxl)
+        kxl = self.k_norm_x(kxl)
+
+        qxl = qxl.transpose(1, 2)
+        kxl = kxl.transpose(1, 2)
+        vxl = vxl.transpose(1, 2)
+
+        if local_config.use_vision_attention_bias:
+            attention_bias = torch.ones((all_vision_tokens_count, all_vision_tokens_count), dtype=torch.bool, device=local_config.device)
+            attention_bias[:, :local_config.weight_tokens] = False
+        else:
+            attention_bias = None
+        out_joint_l = F.scaled_dot_product_attention(qxl, kxl, vxl, dropout_p=0.0, attn_mask=attention_bias)
+        out_joint_l = out_joint_l.transpose(1, 2).reshape(B, all_vision_tokens_count, C)
+        out_joint_l = self.proj_x(out_joint_l)
+        segment_data["vision_learned"][self.block_id] = self.learnable_token_vision_mlp(out_joint_l)
+        
+        segment_data["vision_match"][self.block_id] = self.learnable_token_weight_vision_mlp(
+            torch.cat([out_joint_l[:, :local_config.no_vision_learnable_tokens,:], out_y_learned.expand(-1, local_config.no_vision_learnable_tokens, -1)], dim=-1)
+        )
+        
+        
+        ####################################################################################################
+        
 
         B, Nx, C = x.shape
         By, Ny, Cy = y.shape
@@ -181,6 +231,8 @@ class MMDiTJointAttention(nn.Module):
                 torch.save(self.learnable_token_vision_mlp.state_dict(), f"learnable_token_vision_mlp_{self.block_id}.pt")
             if local_config.use_text_mlp:
                 torch.save(self.learnable_token_text_mlp.state_dict(), f"learnable_token_text_mlp_{self.block_id}.pt")
+            torch.save(self.learnable_token_weight_vision_mlp.state_dict(), f"learnable_token_weight_vision_mlp_{self.block_id}.pt")
+            torch.save(self.learnable_token_vision, f"learnable_token_vision_{self.block_id}.pt")
 
 class MMDiTBlockT2I(nn.Module):
     def __init__(self, hidden_size, groups, mlp_ratio=4.0, adaLN_modulation_img=None, adaLN_modulation_txt=None, block_id=-1):
@@ -390,27 +442,8 @@ class PixDiT_T2I(nn.Module):
         gt_binary =  einops.rearrange(gt_binary, "b h w -> b (h w)")
         return torch.stack([gt_binary[lid+1] for lid in label_ids], dim=0)
 
-    def compute_masks(self, features, tokens):
-        B, L, P, D = features.shape
-        # tokens = self.norm_learnable_token(tokens)
-        my_norm = lambda x: x #torch.nn.functional.normalize(x, dim=-1)
-        masks = my_norm(features) @ my_norm(tokens).permute(1, 0, 3, 2)
-        # masks = self.norm_learnable_token(masks)
-        merged_mask = masks.sum(dim=-1).sum(dim=1) # sum on layers dimension and no.tokens dimension
-        min_max = lambda x: (x - x.min()) / (x.max() - x.min())
-        # merged_mask = torch.softmax(merged_mask / 100, dim=-1)
-        merged_mask = min_max(merged_mask)
-        return merged_mask
-
-    def compute_loss(self, features, tokens, segment_data):
-        B, L, P, D = features.shape
-        gt_bin = PixDiT_T2I.get_gt_bin(segment_data).to(local_config.device)
-
-        merged_mask = self.compute_masks(features, tokens)
-
-
-
-
+    @staticmethod
+    def save_intermediary_plots(merged_mask, gt_bin, segment_data):
         import matplotlib.pyplot as plt
         import os
 
@@ -436,12 +469,49 @@ class PixDiT_T2I(nn.Module):
                     plt.close(fig)
             os.remove("print")
 
+    @staticmethod
+    def min_max(masks, dim):
+        # reduce over the last dim, keep dims for broadcasting
+        mins = masks.amin(dim=dim, keepdim=True)
+        maxs = masks.amax(dim=dim, keepdim=True)
+        return (masks - mins) / (maxs - mins + 1e-8)
+        
+    def compute_masks(self, features, tokens, weights):
+        B, L, P, D = features.shape
+        # tokens = self.norm_learnable_token(tokens)
+        my_norm = lambda x: x if not local_config.norm_before_dot else torch.nn.functional.normalize(x, dim=-1)
+        # min_max = lambda x: (x - x.min()) / (x.max() - x.min())
+        masks = my_norm(features) @ my_norm(tokens).permute(0, 1, 3, 2)
+        # masks = self.norm_learnable_token(masks)
 
+        # masks (b, l, p, t) * (b, l, 1, t)
+        masks = self.min_max(masks, 2) * weights.permute(0,1,3,2)
+        merged_mask = masks.sum(dim=-1).sum(dim=1) # sum on layers dimension and no.tokens dimension
+        # merged_mask = torch.softmax(merged_mask / 100, dim=-1)
+        # merged_mask = self.min_max(merged_mask, -1)
+        merged_mask = torch.nn.functional.threshold(
+            merged_mask,
+            threshold=0.0,
+            value=0.0
+        )
+        return self.min_max(merged_mask, dim=-1)
 
-        intersection = (gt_bin * merged_mask).sum(dim=-1)
-        union = merged_mask.sum(dim=-1) + gt_bin.sum(dim=-1) - intersection
-        iou = (intersection + 1e-7) / (union + 1e-7)
-        return 1.0 - iou.mean()
+    def compute_loss(self, features, tokens, weights, segment_data):
+        B, L, P, D = features.shape
+        gt_bin = PixDiT_T2I.get_gt_bin(segment_data).to(local_config.device)
+
+        merged_mask = self.compute_masks(features, tokens, weights)
+        self.save_intermediary_plots(merged_mask, gt_bin, segment_data)
+        # merged_mask = torch.clamp(merged_mask, 1.0 - 1e-7)
+        # bce = torch.nn.functional.binary_cross_entropy_with_logits(merged_mask, gt_bin, reduction="mean")
+        intersection = (merged_mask * gt_bin).sum(dim=-1)
+        union = merged_mask.sum(dim=-1) + gt_bin.sum(dim=-1)
+        dice = 1.0 - (2.0 * intersection + 1e-7) / (union + 1e-7)
+        dice = dice.mean()
+        return dice
+        # print("bce", bce, "dice", dice)
+        bce_weight = 0.5
+        return bce_weight * bce + (1.0 - bce_weight) * dice
 
     @staticmethod
     def regularization_loss(tokens):
@@ -483,6 +553,8 @@ class PixDiT_T2I(nn.Module):
             segment_data["loss"] = {}
             segment_data["learned"] = {}
             segment_data["target_s"] = {}
+            segment_data["vision_learned"] = {}
+            segment_data["vision_match"] = {}
         
         if s is None:
             s0 = self.s_embedder(x_patches)
@@ -500,12 +572,10 @@ class PixDiT_T2I(nn.Module):
                     attn_mask_joint = torch.cat([pad[:, :Ltxt], pad_img], dim=1).view(B, 1, 1, Ltxt + L)
             self.last_repa_tokens = None
             s = s0
-            s_layers = torch.zeros((s0.shape[-3], min(self.patch_depth, local_config.layer_count), s0.shape[-2], s0.shape[-1]), device=local_config.device, dtype=torch.bfloat16)
 
             with torch.enable_grad():
                 for i in range(min(self.patch_depth, local_config.layer_count)):
                     s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data)
-                    s_layers[:,i] += segment_data["target_s"][i]
                     if 0 < self.repa_encoder_index == (i + 1):
                         self.last_repa_tokens = s
                     
@@ -518,14 +588,18 @@ class PixDiT_T2I(nn.Module):
                     # if segment_data is not None:
                     #     segment_data["mask"][i] = attn_mk.view(B, Hs, Ws)
 
-                tokens = torch.stack(
-                    [segment_data["learned"][i] for i in range(min(self.patch_depth, local_config.layer_count))],
-                    dim=0
-                )
-                loss = self.compute_loss(s_layers, tokens, segment_data) + self.regularization_loss(tokens)
+                stack_features = lambda k: torch.stack([segment_data[k][i] for i in range(min(self.patch_depth, local_config.layer_count))], dim=1)
+                my_norm = lambda x: torch.nn.functional.normalize(x, dim=-1)
+                vision_tokens = stack_features("vision_learned")
+                vision_match = stack_features("vision_match")
+                # language_match = stack_features("learned")
+                tokens = vision_tokens[:,:,:local_config.no_vision_learnable_tokens,:]
+                features = vision_tokens[:,:,local_config.no_vision_learnable_tokens:,:]
+                # weights = my_norm(vision_match) @ my_norm(language_match).permute(0,1,3,2)
+                loss = self.compute_loss(features, tokens, vision_match, segment_data) + self.regularization_loss(tokens)
                 segment_data["loss_final"] = loss # TODO
                 if local_config.use_learned_tokens:
-                    segment_data["mask"][local_config.target_layer] = self.compute_masks(s_layers, tokens).view(B, Hs, Ws)
+                    segment_data["mask"][local_config.target_layer] = self.compute_masks(features, tokens, vision_match).view(B, Hs, Ws)
                 else:
                     segment_data["mask"][local_config.target_layer] = attn_mk.view(B, Hs, Ws)
             s = torch.nn.functional.silu(t_emb + s)
