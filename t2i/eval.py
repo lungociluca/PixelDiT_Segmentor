@@ -192,7 +192,7 @@ class CustomTrainer(Trainer):
     @staticmethod
     def trim_data_loader(data_loader: DataLoader, samples_count: int):
         dataset = data_loader.dataset
-        trimmed_dataset = Subset(dataset, [0])
+        trimmed_dataset = Subset(dataset, list(range(min(samples_count, len(dataset)))))
         trimmed_loader = DataLoader(
             trimmed_dataset,
             batch_size=1,

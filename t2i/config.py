@@ -42,27 +42,31 @@ image_size = 512
 epochs = 1
 lr = 1e-4
 idx_token_of_interest = 0
-eval_samples_limit = 16
+eval_samples_limit = 1500
 target_layer = 0
-layer_count = 1
+layer_count = 2
 timestep = 0.002
 extra_labels_count = 2
 
-grad_accumulation = 16
+grad_accumulation = 128
 
-no_leanable_tokens = 200
+no_leanable_tokens = 1
+no_vision_learnable_tokens = 150
 l2_regularization_weight = 0.
 diversity_regularization_weight = 0.
 
+shuffle = True
 run_on_extra_labels = False
-use_attention_bias = True
+use_attention_bias = False
+use_vision_attention_bias = False
 use_vision_mlp = True
-use_text_mlp = False
+use_text_mlp = True
+norm_before_dot = True
 
 crop_size = True
 compute_model_vectors = False
 use_model_vectors = False
 
 # TODO: update
-save_learned_tokens = False
+save_learned_tokens = Flase 
 use_learned_tokens = not save_learned_tokens

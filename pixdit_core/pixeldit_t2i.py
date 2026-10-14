@@ -243,7 +243,7 @@ class MMDiTBlockT2I(nn.Module):
 
         self.norm_x1 = RMSNorm(hidden_size, eps=1e-6)
         self.norm_y1 = RMSNorm(hidden_size, eps=1e-6)
-        # self.norm_learnable_token = RMSNorm(hidden_size, eps=1e-6)
+        # self.learnable_token_norm_weights = RMSNorm(hidden_size, eps=1e-6)
 
         self.attn = MMDiTJointAttention(hidden_size, num_heads=groups, qkv_bias=False, block_id=block_id)
 
@@ -396,9 +396,9 @@ class PixDiT_T2I(nn.Module):
         self.precompute_pos_txt = dict()
         self.last_repa_tokens = None
 
-        self.norm_learnable_token = torch.nn.LayerNorm(hidden_size)
+        self.learnable_token_norm_weights = torch.nn.LayerNorm(local_config.no_vision_learnable_tokens)
         if local_config.use_learned_tokens:
-            self.norm_learnable_token.load_state_dict(torch.load("norm.pt", weights_only=True))
+            self.learnable_token_norm_weights.load_state_dict(torch.load("norm_weights.pt", weights_only=True))
 
         self.initialize_weights()
 
@@ -478,22 +478,24 @@ class PixDiT_T2I(nn.Module):
         
     def compute_masks(self, features, tokens, weights):
         B, L, P, D = features.shape
-        # tokens = self.norm_learnable_token(tokens)
+        # tokens = self.learnable_token_norm_weights(tokens)
         my_norm = lambda x: x if not local_config.norm_before_dot else torch.nn.functional.normalize(x, dim=-1)
         # min_max = lambda x: (x - x.min()) / (x.max() - x.min())
         masks = my_norm(features) @ my_norm(tokens).permute(0, 1, 3, 2)
-        # masks = self.norm_learnable_token(masks)
+        # masks = self.learnable_token_norm_weights(masks)
 
         # masks (b, l, p, t) * (b, l, 1, t)
-        masks = self.min_max(masks, 2) * weights.permute(0,1,3,2)
+        masks = self.min_max(masks, 2) * self.learnable_token_norm_weights(weights.permute(0,1,3,2))
         merged_mask = masks.sum(dim=-1).sum(dim=1) # sum on layers dimension and no.tokens dimension
         # merged_mask = torch.softmax(merged_mask / 100, dim=-1)
         # merged_mask = self.min_max(merged_mask, -1)
-        merged_mask = torch.nn.functional.threshold(
-            merged_mask,
-            threshold=0.0,
-            value=0.0
-        )
+        # merged_mask = torch.nn.functional.threshold(
+        #     merged_mask,
+        #     threshold=0.0,
+        #     value=0.0
+        # )
+        return merged_mask
+        return merged_mask.sigmoid()
         return self.min_max(merged_mask, dim=-1)
 
     def compute_loss(self, features, tokens, weights, segment_data):
@@ -503,12 +505,12 @@ class PixDiT_T2I(nn.Module):
         merged_mask = self.compute_masks(features, tokens, weights)
         self.save_intermediary_plots(merged_mask, gt_bin, segment_data)
         # merged_mask = torch.clamp(merged_mask, 1.0 - 1e-7)
-        # bce = torch.nn.functional.binary_cross_entropy_with_logits(merged_mask, gt_bin, reduction="mean")
-        intersection = (merged_mask * gt_bin).sum(dim=-1)
-        union = merged_mask.sum(dim=-1) + gt_bin.sum(dim=-1)
+        bce = torch.nn.functional.binary_cross_entropy_with_logits(merged_mask, gt_bin, reduction="mean")
+        intersection = (merged_mask.sigmoid() * gt_bin).sum(dim=-1)
+        union = merged_mask.sigmoid().sum(dim=-1) + gt_bin.sum(dim=-1)
         dice = 1.0 - (2.0 * intersection + 1e-7) / (union + 1e-7)
         dice = dice.mean()
-        return dice
+        # return dice
         # print("bce", bce, "dice", dice)
         bce_weight = 0.5
         return bce_weight * bce + (1.0 - bce_weight) * dice
@@ -599,7 +601,9 @@ class PixDiT_T2I(nn.Module):
                 loss = self.compute_loss(features, tokens, vision_match, segment_data) + self.regularization_loss(tokens)
                 segment_data["loss_final"] = loss # TODO
                 if local_config.use_learned_tokens:
-                    segment_data["mask"][local_config.target_layer] = self.compute_masks(features, tokens, vision_match).view(B, Hs, Ws)
+                    masks = self.compute_masks(features, tokens, vision_match).sigmoid()
+                    masks = self.min_max(masks, dim=-1)
+                    segment_data["mask"][local_config.target_layer] = masks.view(B, Hs, Ws)
                 else:
                     segment_data["mask"][local_config.target_layer] = attn_mk.view(B, Hs, Ws)
             s = torch.nn.functional.silu(t_emb + s)
@@ -630,4 +634,4 @@ class PixDiT_T2I(nn.Module):
 
     def __del__(self):
         if local_config.save_learned_tokens:
-            torch.save(self.norm_learnable_token.state_dict(), "norm.pt")
+            torch.save(self.learnable_token_norm_weights.state_dict(), "norm_weights.pt")
