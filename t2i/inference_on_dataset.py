@@ -285,7 +285,7 @@ def inference_on_dataset(
         for ep in range(local_config.epochs):
             print("ep", ep)
             for idx, inputs in enumerate(data_loader):
-                print(idx)
+                # print(idx)
                 # FIX: global step index across all epochs. Drives warmup,
                 # ETA, and the final flush so they behave correctly for
                 # multi-epoch runs.

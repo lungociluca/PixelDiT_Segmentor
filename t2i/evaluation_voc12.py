@@ -187,9 +187,9 @@ class Args:
     # list='/root/autodl-tmp/wjl/ptp_diffusion/voc12/train_aug_id.txt'
     logfile=os.path.join(base_dir,'eval.txt')
     num_classes=21
-    start=0
-    end=61
-    step=2
+    start=10
+    end=60
+    step=5
     t=None
     type='npy'
     sample_images=True

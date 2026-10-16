@@ -44,7 +44,7 @@ lr = 1e-4
 idx_token_of_interest = 0
 eval_samples_limit = 1500
 target_layer = 0
-layer_count = 2
+layer_count = 3
 timestep = 0.002
 extra_labels_count = 2
 
@@ -55,7 +55,7 @@ no_vision_learnable_tokens = 150
 l2_regularization_weight = 0.
 diversity_regularization_weight = 0.
 
-shuffle = True
+shuffle = False
 run_on_extra_labels = False
 use_attention_bias = False
 use_vision_attention_bias = False
@@ -68,5 +68,5 @@ compute_model_vectors = False
 use_model_vectors = False
 
 # TODO: update
-save_learned_tokens = Flase 
+save_learned_tokens = False 
 use_learned_tokens = not save_learned_tokens
