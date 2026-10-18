@@ -210,7 +210,15 @@ class Pix_Segmentor(torch.nn.Module):
         extra_labels_count = local_config.extra_labels_count
         all_extra_labels = [x for x in self.labels if x not in gt_labels]
         samples_extra_labels = random.sample(all_extra_labels, extra_labels_count)
-        return gt_labels + samples_extra_labels 
+        return gt_labels + samples_extra_labels
+    
+    @staticmethod
+    def select_labels(current_labels):
+        try:
+            # will break if sample size < label size
+            return random.sample(current_labels, local_config.select_labels_count)
+        except ValueError:
+            return current_labels 
 
     # get GT for output shapes and input prompts
     def get_gt(self, x):
@@ -225,18 +233,18 @@ class Pix_Segmentor(torch.nn.Module):
             prompts, max_length=506, padding="max_length", truncation=True, return_tensors="pt"
         ).to(local_config.device)
         select_index = [0] + list(range(-300 + 1, 0))
-        caption_embs = self.text_encoder(caption_token.input_ids, caption_token.attention_mask)[0][:, None][
+        caption_embs_list = [self.text_encoder(caption_token.input_ids[[i]], caption_token.attention_mask[[i]])[0][:, None][
             :, :, select_index
-        ]
+        ] for i in range(caption_token.input_ids.shape[0])]
+        caption_embs = torch.cat(caption_embs_list, dim=0).cpu()
         tokens_count = caption_token.attention_mask.sum(dim=-1)
         emb_masks = caption_token.attention_mask[:, select_index]
         return caption_embs, emb_masks, tokens_count
     
     def run_diffusion_model(self, image, prompts, target_labels, segment_data):
-        label_indexes = [self.labels.index(target) for target in target_labels]
-        emb = torch.stack([self.emb[i] for i in label_indexes], dim=0)
-        emb_mask = torch.stack([self.emb_mask[i] for i in label_indexes], dim=0)
-        tokens_count = [self.tokens_count[i] for i in label_indexes]
+        emb = torch.stack([self.emb[i] for i in target_labels], dim=0)
+        emb_mask = torch.stack([self.emb_mask[i] for i in target_labels], dim=0)
+        tokens_count = [self.tokens_count[i] for i in target_labels]
         # emb, emb_mask, tokens_count = self.embed_condition(prompts)
         model_kwargs = dict(data_info={"img_hw": image.shape[-2], "aspect_ratio": 1}, mask=emb_mask)
         segment_data["tokens_count"] = tokens_count
@@ -256,7 +264,7 @@ class Pix_Segmentor(torch.nn.Module):
 
         image = Pix_Segmentor.resize_input(image, (local_config.image_size,local_config.image_size))
         samples = dpm_solver.segment(
-            image.repeat(len(prompts),1,1,1),
+            image.repeat(len(target_labels),1,1,1),
             segment_data
         )
 
@@ -281,37 +289,43 @@ class Pix_Segmentor(torch.nn.Module):
         h, w = gt.shape[-2:]
         file_id = Pix_Segmentor.img_id_from_path(x)
         target_labels = self.prompts_dict[file_id]
-        
+        label_indexes = [self.labels.index(x) for x in target_labels]
+        if local_config.select_labels_count:
+            label_indexes = self.select_labels(label_indexes)
         if local_config.run_on_extra_labels:
             target_labels = self.add_extra_labels(target_labels)
-        prompts = [local_config.prompt_format.format(target=current_target) for current_target in target_labels]
+            label_indexes = [self.labels.index(x) for x in target_labels]
 
-        segment_data = {"labels": target_labels, "img_id": file_id}
-        if True:
-            segment_data["gt"] = gt
-            segment_data["label_ids"] = [self.labels.index(t) for t in target_labels]
+        # TODO: fix for the inputs of ADE20k with empty target lists
+        assert len(label_indexes) > 0
+        gt_bin = torch.nn.functional.one_hot(gt[0].to(torch.int64), num_classes=local_config.label_count+1).to(local_config.device)
+        predictions_all = torch.zeros((len(self.labels)+1), h, w).to(local_config.device)
+        for current_label, current_target in zip(label_indexes, target_labels):
+            prompts = [local_config.prompt_format.format(target=current_target) for current_target in [current_target]]
+            segment_data = {"labels": target_labels, "img_id": file_id, "label_ids": [current_label]}
+            if True:
+                segment_data["gt"] = gt
+                # segment_data["label_ids"] = [self.labels.index(t) for t in target_labels]
 
-        self.run_diffusion_model(image_tensor, prompts, target_labels, segment_data)
-        assert segment_data["mask"][local_config.target_layer].shape[0] == len(prompts)
-        prediction = segment_data["mask"][local_config.target_layer]
-        
-        # pad image if crops were used
-        if local_config.crop_size is not None:
-            prediction = Pix_Segmentor.pad_prediction(prediction, original_shape)
-        prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
-        predictions_all = torch.zeros((len(self.labels)+1), h, w).to(prediction.device)
+            self.run_diffusion_model(image_tensor, prompts, [current_label], segment_data)
+            # assert segment_data["mask"][local_config.target_layer].shape[0] == min(local_config.select_labels_count or 0, len(prompts))
+            prediction = segment_data["mask"][local_config.target_layer]
+            
+            # pad image if crops were used
+            if local_config.crop_size is not None:
+                prediction = Pix_Segmentor.pad_prediction(prediction, original_shape)
+            prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
+            predictions_all[current_label] += prediction[0]
 
         if local_config.use_learned_tokens:
             cam_dict = {}
             min_max_norm = lambda x: (x - x.min()) / (x.max() - x.min())
-            for i, current_label in enumerate(target_labels):
-                label_idx = self.labels.index(current_label) + 1
-                predictions_all[label_idx-1] += prediction[i]
+            for i, current_label_id in enumerate(label_indexes):
                 if not local_config.use_learned_tokens:
-                    current_pred = min_max_norm(prediction[i].to(torch.float32))
+                    current_pred = min_max_norm(predictions_all[current_label_id].to(torch.float32))
                 else:
-                    current_pred = prediction[i].to(torch.float32)
-                cam_dict[str(label_idx-1)] = (current_pred * 255).cpu().numpy()
+                    current_pred = predictions_all[current_label_id].to(torch.float32)
+                cam_dict[str(current_label_id)] = (current_pred * 255).cpu().numpy()
 
             save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
             sio.savemat(save_path, cam_dict, do_compression=True)
