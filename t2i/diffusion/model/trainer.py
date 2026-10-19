@@ -8,14 +8,15 @@ import torch.nn.functional as F
 from diffusion.model.builder import MODELS
 
 # Ensure the top-level pixdit_core repo (shared components) is importable when running inside job sandboxes
-try:
-    _REPO_ROOT = Path(__file__).resolve().parents[3]
-    if str(_REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(_REPO_ROOT))
-    from pixdit_core.pixeldit_t2i import PixDiT_T2I  # type: ignore
-except Exception:
-    PixDiT_T2I = None  # type: ignore
+# try:
+#     _REPO_ROOT = Path(__file__).resolve().parents[3]
+#     if str(_REPO_ROOT) not in sys.path:
+#         sys.path.insert(0, str(_REPO_ROOT))
+#     from pixdit_core.pixeldit_t2i import PixDiT_T2I  # type: ignore
+# except Exception:
+#     PixDiT_T2I = None  # type: ignore
 
+from pixdit_core.pixeldit_t2i import PixDiT_T2I
 
 
 @MODELS.register_module()

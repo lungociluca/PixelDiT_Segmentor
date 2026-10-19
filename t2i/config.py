@@ -4,7 +4,7 @@ class EvalDataset(Enum):
     VOC12 = "voc_2012_test_sem_seg"
     ADE20 = "ade20k_sem_seg_val"
     # ADE20 = "ade20k_sem_seg_train"
-    COCO = "coco_2017_test_stuff_all_sem_seg"
+    COCO = "coco_2017_train_stuff_all_sem_seg"
 
 class SegmentDataKeys(Enum):
     MASK = "mask"
@@ -29,6 +29,13 @@ dataset_paths = {
         "gt_dir": "SegmentationClassAug",
         "extention": ".png",
         "label_count": 20
+    },
+    EvalDataset.COCO: {
+        "json": "catseg_configs/coco.json",
+        "img_dir": "images",
+        "gt_dir": "annotations",
+        "extention": ".png",
+        "label_count": 181
     }
 }
 
@@ -38,21 +45,21 @@ small or large [TARGET]; near or distant [TARGET]; visible, partially visible, o
 
 prompt_format = 'This should be a realistic image. A scene with a {target} somewhere. The {target} can be close or far. It can be a small {target} or a large {target}. There should be other stuff, for example: sky, vegetation, mutliple objects.'
 device = "cuda"
-eval_dataset = EvalDataset.ADE20
+eval_dataset = EvalDataset.COCO
 current_ds_paths = dataset_paths[eval_dataset]
 ds_config_path = current_ds_paths["json"]
 label_count = current_ds_paths["label_count"]
 image_size = 512
 
-epochs = 1
+epochs = 2
 lr = 1e-4
 idx_token_of_interest = 0
-eval_samples_limit = 25000
+eval_samples_limit = 9999999
 target_layer = 0
 layer_count = 2
 timestep = 0.002
 extra_labels_count = 2
-select_labels_count = None
+select_labels_count = 4
 
 grad_accumulation = 128
 
