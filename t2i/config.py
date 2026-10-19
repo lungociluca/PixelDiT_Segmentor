@@ -4,6 +4,7 @@ class EvalDataset(Enum):
     VOC12 = "voc_2012_test_sem_seg"
     ADE20 = "ade20k_sem_seg_val"
     # ADE20 = "ade20k_sem_seg_train"
+    COCO = "coco_2017_test_stuff_all_sem_seg"
 
 class SegmentDataKeys(Enum):
     MASK = "mask"
@@ -73,5 +74,5 @@ compute_model_vectors = False
 use_model_vectors = False
 
 # TODO: update
-save_learned_tokens = False 
+save_learned_tokens = True 
 use_learned_tokens = not save_learned_tokens
