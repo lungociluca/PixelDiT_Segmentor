@@ -69,7 +69,7 @@ def extract_class_ids(
             "expected a 2D indexed mask."
         )
     try:
-        labels = [classes_list[int(value)-1] for value in np.unique(mask) if int(value) not in ignore_labels]
+        labels = [classes_list[int(value)-1] for value in np.unique(mask) if int(value) not in ignore_labels and classes_list[int(value)-1] != "unknown"]
     except IndexError:
         print("index", np.unique(mask), len(classes_list), "ignore", ignore_labels)
         print("ignore", [int(value) not in ignore_labels for value in np.unique(mask)])
