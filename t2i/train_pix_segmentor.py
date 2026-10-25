@@ -11,6 +11,7 @@ from argparse import Namespace
 import json
 
 import torch.nn.functional as F
+import torch.nn as nn
 import matplotlib.pyplot as plt
 import scipy.io as sio
 import matplotlib.pyplot as plt
@@ -23,6 +24,8 @@ from diffusion.utils.config import PixDiTConfig, model_init_config
 from diffusion.utils.logger import get_root_logger
 
 from diffusion import DPMS
+from diffusion.model.builder import MODELS
+from pixdit_core.pixeldit_t2i import PixDiT_T2I
 
 
 @dataclass

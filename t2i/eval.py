@@ -7,6 +7,7 @@ This script is a simplified version of the training script in detectron2/tools.
 from collections import OrderedDict
 import logging
 import os
+import shutil
 
 import math
 import torch
@@ -14,7 +15,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Subset, DataLoader
 
-from pix_segmentor import Pix_Segmentor
 import detectron2.utils.comm as comm
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
@@ -46,6 +46,11 @@ from detectron2.data import MetadataCatalog
 from register_pascal_20 import register_all_pascal_voc
 from register_coco import register_all_coco_stuff_10k
 
+if local_config.use_learned_tokens:
+    from eval_pix_segmentor import Pix_Segmentor
+else:
+    from train_pix_segmentor import Pix_Segmentor
+    
 class VOCbEvaluator(SemSegEvaluator):
     """
     Evaluate semantic segmentation metrics.
@@ -359,10 +364,13 @@ def setup(args):
     setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="mask_former")
     return cfg
 
+def setup_target_classes():
+    shutil.copy(f"prompts/{local_config.eval_dataset.value}.json", "prompts/prompts.json")
 
 def main(args):
     cfg = setup(args)
     torch.set_float32_matmul_precision("high")
+    setup_target_classes()
 
     model = CustomTrainer.build_model(cfg)
     res = CustomTrainer.test(cfg, model)

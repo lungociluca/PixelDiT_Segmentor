@@ -1,10 +1,12 @@
 from enum import Enum
 
+save_learned_tokens = False 
+
 class EvalDataset(Enum):
     VOC12 = "voc_2012_test_sem_seg"
-    ADE20 = "ade20k_sem_seg_val"
+    ADE20 = "ade20k_sem_seg_{split}".format(split="train" if save_learned_tokens else "val")
     # ADE20 = "ade20k_sem_seg_train"
-    COCO = "coco_2017_train_stuff_all_sem_seg"
+    COCO = "coco_2017_{split}_stuff_all_sem_seg".format(split="train" if save_learned_tokens else "test")
 
 class SegmentDataKeys(Enum):
     MASK = "mask"
@@ -51,24 +53,24 @@ ds_config_path = current_ds_paths["json"]
 label_count = current_ds_paths["label_count"]
 image_size = 512
 
-epochs = 2
+epochs = 1
 lr = 1e-4
 idx_token_of_interest = 0
-eval_samples_limit = 9999999
+eval_samples_limit = 10
 target_layer = 0
-layer_count = 2
+layer_count = 3
 timestep = 0.002
 extra_labels_count = 2
 select_labels_count = 4
 
-grad_accumulation = 128
+grad_accumulation = 1
 
 no_leanable_tokens = 1
 no_vision_learnable_tokens = 150
 l2_regularization_weight = 0.
 diversity_regularization_weight = 0.
 
-shuffle = True
+shuffle = False
 run_on_extra_labels = False
 use_attention_bias = False
 use_vision_attention_bias = False
@@ -81,5 +83,4 @@ compute_model_vectors = False
 use_model_vectors = False
 
 # TODO: update
-save_learned_tokens = True 
 use_learned_tokens = not save_learned_tokens
