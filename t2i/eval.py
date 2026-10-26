@@ -47,7 +47,7 @@ from register_pascal_20 import register_all_pascal_voc
 from register_coco import register_all_coco_stuff_10k
 
 if local_config.use_learned_tokens:
-    from eval_pix_segmentor import Pix_Segmentor
+    from train_pix_segmentor import Pix_Segmentor
 else:
     from train_pix_segmentor import Pix_Segmentor
     
@@ -93,7 +93,8 @@ class Trainer(DefaultTrainer):
     
     @classmethod
     def build_optimizer(cls, model):
-
+        if not local_config.save_learned_tokens:
+            return None
         # ONLY optimize the learnable token
         token_params = [
             param
@@ -101,8 +102,8 @@ class Trainer(DefaultTrainer):
             if "learnable_token" in name and param.requires_grad
         ]
 
-        assert len(token_params) > 0, \
-            "No trainable learnable_token parameter found."
+        # assert len(token_params) > 0, \
+        #     "No trainable learnable_token parameter found."
 
         # TODO
         optimizer = torch.optim.AdamW(
@@ -206,7 +207,7 @@ class CustomTrainer(Trainer):
             num_workers=data_loader.num_workers,
             collate_fn=data_loader.collate_fn,
             pin_memory=data_loader.pin_memory,
-            drop_last=False,  # Don't drop samples from trimmed data
+            drop_last=local_config.save_learned_tokens
         )
         return trimmed_loader
 

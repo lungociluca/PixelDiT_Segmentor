@@ -290,8 +290,8 @@ class Pix_Segmentor(torch.nn.Module):
         file_id = Pix_Segmentor.img_id_from_path(x)
         target_labels = self.prompts_dict[file_id]
         label_indexes = [self.labels.index(x) for x in target_labels]
-        if local_config.select_labels_count:
-            label_indexes = self.select_labels(label_indexes)
+        # if local_config.select_labels_count:
+        #     label_indexes = self.select_labels(label_indexes)
         if local_config.run_on_extra_labels:
             target_labels = self.add_extra_labels(target_labels)
             label_indexes = [self.labels.index(x) for x in target_labels]

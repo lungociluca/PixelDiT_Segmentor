@@ -10,3 +10,10 @@ wandb
 h5py
 pyrallis
 termcolor
+matplotlib
+scipy
+pytz
+fvcore
+cloudpickle
+pycocotools
+einops

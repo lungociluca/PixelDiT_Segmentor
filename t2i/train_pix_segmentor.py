@@ -14,7 +14,6 @@ import torch.nn.functional as F
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import scipy.io as sio
-import matplotlib.pyplot as plt
 
 import config as local_config
 
@@ -116,7 +115,7 @@ def get_model():
         config.model.model, use_fp32_attention=config.model.get("fp32_attention", False), **model_kwargs
     )
     for name, param in model.named_parameters():
-        param.requires_grad = ("learnable_token" in name)
+        param.requires_grad = ("learnable_token" in name) and local_config.save_learned_tokens
         
     model = model.to(device)
     logger.info(
@@ -139,6 +138,7 @@ class Pix_Segmentor(torch.nn.Module):
         with open(local_config.ds_config_path) as f:
             self.labels = json.load(f)
         self.emb, self.emb_mask, self.tokens_count = self.precompute_prompts()
+        self.clean_labels = [x for x in self.labels if x != "unknown"]
         
         del self.tokenizer
         del self.text_encoder
@@ -146,6 +146,9 @@ class Pix_Segmentor(torch.nn.Module):
     def precompute_prompts(self):
         precomputed_embs = {}
         prompts = [local_config.prompt_format.format(target=current_target) for current_target in self.labels]
+        with open("delete_debug.txt", "w") as f:
+            for i, v in enumerate(prompts):
+                f.write(f"{i}: {v}\n")
         return self.embed_condition(prompts)
 
     @staticmethod
@@ -245,9 +248,11 @@ class Pix_Segmentor(torch.nn.Module):
         return caption_embs, emb_masks, tokens_count
     
     def run_diffusion_model(self, image, prompts, target_labels, segment_data):
-        emb = torch.stack([self.emb[i] for i in target_labels], dim=0)
-        emb_mask = torch.stack([self.emb_mask[i] for i in target_labels], dim=0)
-        tokens_count = [self.tokens_count[i] for i in target_labels]
+        # TODO
+        indices = [self.labels.index(t) for t in target_labels]
+        emb = torch.stack([self.emb[i] for i in indices], dim=0)
+        emb_mask = torch.stack([self.emb_mask[i] for i in indices], dim=0)
+        tokens_count = [self.tokens_count[i] for i in indices]
         # emb, emb_mask, tokens_count = self.embed_condition(prompts)
         model_kwargs = dict(data_info={"img_hw": image.shape[-2], "aspect_ratio": 1}, mask=emb_mask)
         segment_data["tokens_count"] = tokens_count
@@ -277,13 +282,32 @@ class Pix_Segmentor(torch.nn.Module):
         #     from torchvision.utils import save_image
         #     save_image(sample, save_path, nrow=1, normalize=True, value_range=(-1, 1))
 
+    def call_model(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
+        prompts = [local_config.prompt_format.format(target=current_target) for current_target in target_labels]
+        segment_data = {"labels": target_labels, "img_id": file_id, "label_ids": label_indexes, \
+            "gt_ids": gt_ids, "targets": target_labels, "gt": gt}
+        print("target labels", target_labels, "label_indexes", label_indexes, "gt ids", gt_ids)
+        self.run_diffusion_model(image_tensor, prompts, target_labels, segment_data)
+        assert segment_data["mask"][local_config.target_layer].shape[0] == min(local_config.select_labels_count, len(prompts))
+        prediction = segment_data["mask"][local_config.target_layer]
+        return prediction, segment_data.get("loss_final")
+
+    def single_batch(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
+        return self.call_model(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
+
+    def single_class(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
+        all_predictions = []
+        for gt_id, current_label, current_target in zip(gt_ids, label_indexes, target_labels):
+            prediction, _ = self.call_model(file_id, image_tensor, [current_label], [current_target], [gt_id], original_shape, gt)
+            all_predictions.append(prediction)
+        return torch.cat(all_predictions, dim=0), None
+
     @torch.no_grad()
     def forward_no_grad(self, x):
         # image_tensor = x[0]["image"].float().to(local_config.device) / 255.
         # image_tensor = (image_tensor * 2) - 1
         # TODO: figure out how to use the providex tensor, get rid of reading from disk
-        import PIL.Image
-        image_tensor = PIL.Image.open(f"{x[0]['file_name']}").convert("RGB")
+        image_tensor = Image.open(f"{x[0]['file_name']}").convert("RGB")
         image_tensor = torch.from_numpy(np.array(image_tensor)).to(torch.bfloat16).to(local_config.device).permute(2, 0, 1) / 255
         image_tensor = (image_tensor * 2) - 1
         original_shape = image_tensor.shape[-2:]
@@ -291,49 +315,116 @@ class Pix_Segmentor(torch.nn.Module):
         gt = self.get_gt(x)
         h, w = gt.shape[-2:]
         file_id = Pix_Segmentor.img_id_from_path(x)
-        target_labels = self.prompts_dict[file_id]
-        label_indexes = [self.labels.index(x) for x in target_labels]
-        if local_config.select_labels_count:
+        label_indexes = [el.item() for el in torch.unique(x[0]["sem_seg"]) if el.item() != 255]
+        if local_config.select_labels_count and local_config.save_learned_tokens:
             label_indexes = self.select_labels(label_indexes)
         if local_config.run_on_extra_labels:
             target_labels = self.add_extra_labels(target_labels)
             label_indexes = [self.labels.index(x) for x in target_labels]
+        target_labels = [self.clean_labels[el] for el in label_indexes]
+        gt_ids = [self.labels.index(el) for el in target_labels]
 
         # TODO: fix for the inputs of ADE20k with empty target lists
-        assert len(label_indexes) > 0
-        prompts = [local_config.prompt_format.format(target=current_target) for current_target in target_labels]
-        segment_data = {"labels": target_labels, "img_id": file_id, "label_ids": label_indexes}
-        if True:
-            segment_data["gt"] = gt
-            # segment_data["label_ids"] = [self.labels.index(t) for t in target_labels]
+        try:
+            assert len(label_indexes) > 0 and len(label_indexes) == len(target_labels)
+        except AssertionError as e:
+            print(len(label_indexes), len(target_labels))
+            print(file_id)
+            print(gt.unique())
+            print(x[0]["sem_seg"].unique())
+            raise(e)
+        print("ALL LABELS", file_id)
+        print("label indexes", label_indexes, "\n", "targets", target_labels, "\ngt", gt_ids)
+        prediction, loss = self.single_batch(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt) if local_config.save_learned_tokens else \
+            self.single_class(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
 
-        self.run_diffusion_model(image_tensor, prompts, label_indexes, segment_data)
-        assert segment_data["mask"][local_config.target_layer].shape[0] == min(local_config.select_labels_count, len(prompts))
-        prediction = segment_data["mask"][local_config.target_layer]
-        
         # pad image if crops were used
         if local_config.crop_size is not None:
             prediction = Pix_Segmentor.pad_prediction(prediction, original_shape)
         prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
+        # TODO
         predictions_all = torch.zeros((len(self.labels)+1), h, w).to(prediction.device)
-
-        if local_config.use_learned_tokens:
+        
+        if local_config.use_learned_tokens or True:
             cam_dict = {}
-            min_max_norm = lambda x: (x - x.min()) / (x.max() - x.min())
-            for i, current_label_id in enumerate(segment_data["label_ids"]):
-                current_label = self.labels[current_label_id]
-                label_idx = self.labels.index(current_label) + 1
-                predictions_all[label_idx-1] += prediction[i]
-                if not local_config.use_learned_tokens:
-                    current_pred = min_max_norm(prediction[i].to(torch.float32))
-                else:
-                    current_pred = prediction[i].to(torch.float32)
-                cam_dict[str(label_idx-1)] = (current_pred * 255).cpu().numpy()
+            for i, lid in enumerate(label_indexes):
+                predictions_all[lid] += prediction[i]
+                current_pred = prediction[i].to(torch.float32)
+                cam_dict[str(lid)] = (current_pred * 255).cpu().numpy()
 
             save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
             sio.savemat(save_path, cam_dict, do_compression=True)
         
-        return [{"sem_seg": predictions_all, "learnable_token_loss": segment_data["loss_final"]}]
+        if os.path.isfile("print2"):
+            seeem = F.interpolate(x[0]["sem_seg"][None, None].to(torch.float64), (h,w), mode="nearest").detach().cpu()[0,0].to(torch.int64)
+            seeem[seeem == 255] = 0
+            self.plot_segmentation_maps(torch.argmax(predictions_all[None,:,:,:], dim=1).detach().cpu()[0], seeem, "pred", "gt", f"trash2/{file_id}.png")
+
+        return [{"sem_seg": predictions_all, "learnable_token_loss": loss}]
     
     def forward(self, x):
         return self.forward_no_grad(x)
+
+    @staticmethod
+    def plot_segmentation_maps(
+        mask1: np.ndarray,
+        mask2: np.ndarray,
+        prediction_id1: str,
+        prediction_id2: str,
+        save_path: str = "segmentation_comparison.png",
+    ):
+        """
+        Plot two semantic segmentation maps side by side and save the figure.
+
+        Args:
+            mask1: First 2D segmentation map, with class IDs in [0, 171].
+            mask2: Second 2D segmentation map, with class IDs in [0, 171].
+            prediction_id1: ID/name of the first prediction.
+            prediction_id2: ID/name of the second prediction.
+            save_path: Output image file path.
+        """
+        mask1 = np.asarray(mask1)
+        mask2 = np.asarray(mask2)
+
+        if mask1.ndim != 2 or mask2.ndim != 2:
+            raise ValueError("Both segmentation maps must be 2D arrays.")
+
+        if mask1.shape != mask2.shape:
+            raise ValueError(
+                f"Mask shapes must match: {mask1.shape} vs {mask2.shape}"
+            )
+
+        for name, mask in [("mask1", mask1), ("mask2", mask2)]:
+            if not np.issubdtype(mask.dtype, np.integer):
+                raise ValueError(f"{name} must contain integer class IDs.")
+            if mask.min() < 0 or mask.max() > 172:
+                print(mask.min(), mask.max())
+                raise ValueError(f"{name} must contain class IDs from 0 to 171.")
+
+        # Use the same discrete color mapping for both masks.
+        cmap = plt.get_cmap("turbo", 172)
+        norm = plt.Normalize(vmin=-0.5, vmax=172.5)
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+        im1 = axes[0].imshow(mask1, cmap=cmap, norm=norm, interpolation="nearest")
+        axes[0].set_title(f"Prediction ID: {prediction_id1}")
+        axes[0].axis("off")
+
+        im2 = axes[1].imshow(mask2, cmap=cmap, norm=norm, interpolation="nearest")
+        axes[1].set_title(f"Prediction ID: {prediction_id2}")
+        axes[1].axis("off")
+
+        # Shared color bar showing class IDs.
+        cbar = fig.colorbar(
+            im2,
+            ax=axes,
+            ticks=np.arange(0, 172, 10),
+            fraction=0.025,
+            pad=0.03,
+        )
+        cbar.set_label("Class ID")
+
+        fig.tight_layout()
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)

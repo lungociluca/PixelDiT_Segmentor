@@ -11,5 +11,5 @@ rm -r output;
 #   --custom_height 512 --custom_width 512 \
 #   --cfg_scale 2.75 --seed 2025 \
 #   --work_dir "."
-export DETECTRON2_DATASETS="../.."; 
+export DETECTRON2_DATASETS="../../datasets"; 
 python eval.py;
