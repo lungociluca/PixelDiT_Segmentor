@@ -146,9 +146,6 @@ class Pix_Segmentor(torch.nn.Module):
     def precompute_prompts(self):
         precomputed_embs = {}
         prompts = [local_config.prompt_format.format(target=current_target) for current_target in self.labels]
-        with open("delete_debug.txt", "w") as f:
-            for i, v in enumerate(prompts):
-                f.write(f"{i}: {v}\n")
         return self.embed_condition(prompts)
 
     @staticmethod
@@ -286,7 +283,6 @@ class Pix_Segmentor(torch.nn.Module):
         prompts = [local_config.prompt_format.format(target=current_target) for current_target in target_labels]
         segment_data = {"labels": target_labels, "img_id": file_id, "label_ids": label_indexes, \
             "gt_ids": gt_ids, "targets": target_labels, "gt": gt}
-        print("target labels", target_labels, "label_indexes", label_indexes, "gt ids", gt_ids)
         self.run_diffusion_model(image_tensor, prompts, target_labels, segment_data)
         assert segment_data["mask"][local_config.target_layer].shape[0] == min(local_config.select_labels_count, len(prompts))
         prediction = segment_data["mask"][local_config.target_layer]
@@ -297,10 +293,14 @@ class Pix_Segmentor(torch.nn.Module):
 
     def single_class(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
         all_predictions = []
+        image_loss = []
         for gt_id, current_label, current_target in zip(gt_ids, label_indexes, target_labels):
-            prediction, _ = self.call_model(file_id, image_tensor, [current_label], [current_target], [gt_id], original_shape, gt)
+            prediction, loss = self.call_model(file_id, image_tensor, [current_label], [current_target], [gt_id], original_shape, gt)
             all_predictions.append(prediction)
-        return torch.cat(all_predictions, dim=0), None
+            image_loss.append(loss)
+        with torch.enable_grad():
+            final_loss = torch.stack(image_loss).sum()
+        return torch.cat(all_predictions, dim=0), final_loss
 
     @torch.no_grad()
     def forward_no_grad(self, x):
@@ -312,8 +312,8 @@ class Pix_Segmentor(torch.nn.Module):
         image_tensor = (image_tensor * 2) - 1
         original_shape = image_tensor.shape[-2:]
 
-        gt = self.get_gt(x)
-        h, w = gt.shape[-2:]
+        h, w = x[0]["height"], x[0]["width"]
+        gt = x[0]["sem_seg"]
         file_id = Pix_Segmentor.img_id_from_path(x)
         label_indexes = [el.item() for el in torch.unique(x[0]["sem_seg"]) if el.item() != 255]
         if local_config.select_labels_count and local_config.save_learned_tokens:
@@ -333,9 +333,7 @@ class Pix_Segmentor(torch.nn.Module):
             print(gt.unique())
             print(x[0]["sem_seg"].unique())
             raise(e)
-        print("ALL LABELS", file_id)
-        print("label indexes", label_indexes, "\n", "targets", target_labels, "\ngt", gt_ids)
-        prediction, loss = self.single_batch(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt) if local_config.save_learned_tokens else \
+        prediction, loss = self.single_batch(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt) if False and local_config.save_learned_tokens else \
             self.single_class(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
 
         # pad image if crops were used
@@ -343,27 +341,75 @@ class Pix_Segmentor(torch.nn.Module):
             prediction = Pix_Segmentor.pad_prediction(prediction, original_shape)
         prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
         # TODO
-        predictions_all = torch.zeros((len(self.labels)+1), h, w).to(prediction.device)
+        predictions_all = torch.zeros(172 if "coco" in local_config.eval_dataset.value else len(self.labels) + 1, h, w).to(prediction.device)
         
-        if local_config.use_learned_tokens or True:
+        if local_config.use_learned_tokens or True: # TODO
             cam_dict = {}
             for i, lid in enumerate(label_indexes):
                 predictions_all[lid] += prediction[i]
-                current_pred = prediction[i].to(torch.float32)
-                cam_dict[str(lid)] = (current_pred * 255).cpu().numpy()
+                # current_pred = prediction[i].to(torch.float32)
+                # cam_dict[str(lid)] = (current_pred * 255).cpu().numpy()
 
-            save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
-            sio.savemat(save_path, cam_dict, do_compression=True)
+            # save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
+            # sio.savemat(save_path, cam_dict, do_compression=True)
         
         if os.path.isfile("print2"):
             seeem = F.interpolate(x[0]["sem_seg"][None, None].to(torch.float64), (h,w), mode="nearest").detach().cpu()[0,0].to(torch.int64)
             seeem[seeem == 255] = 0
             self.plot_segmentation_maps(torch.argmax(predictions_all[None,:,:,:], dim=1).detach().cpu()[0], seeem, "pred", "gt", f"trash2/{file_id}.png")
 
+            sbin = torch.nn.functional.one_hot(seeem.to(torch.int64), num_classes=172)
+            import einops
+            sbin = einops.rearrange(sbin, "h w c -> c h w")
+            for i, lid in enumerate(label_indexes):
+                fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+
+                axes[0].imshow(prediction[i].to(torch.float32).detach().cpu(), cmap="hot")
+                axes[0].set_title(f"pred {i} -> {lid}")
+                axes[0].axis("off")
+
+                axes[1].imshow(sbin[lid], cmap="hot",)
+                axes[1].set_title("gt_bin")
+                axes[1].axis("off")
+
+                plt.tight_layout()
+                plt.savefig(f"trash/{i}.jpg")
+                plt.close(fig)
+                # current_pred = prediction[i].to(torch.float32)
+                # cam_dict[str(lid)] = (current_pred * 255).cpu().numpy()
         return [{"sem_seg": predictions_all, "learnable_token_loss": loss}]
     
     def forward(self, x):
         return self.forward_no_grad(x)
+
+    # @staticmethod
+    # def get_gt_bin(segment_data):
+    #     gt = segment_data["gt"]
+    #     label_ids = segment_data["label_ids"]
+    #     h, w = segment_data["hw"]
+
+    #     gt[gt == 255] = 0
+    #     gt_binary = torch.nn.functional.one_hot(gt[0].to(torch.int64), num_classes=local_config.label_count+1)
+    #     gt_binary = F.interpolate(gt_binary.permute(2,0,1).unsqueeze(0).to(torch.bfloat16), (h, w), mode="nearest")[0]
+    #     gt_binary =  einops.rearrange(gt_binary, "b h w -> b (h w)")
+    #     return torch.stack([gt_binary[lid+1] for lid in label_ids], dim=0)
+
+    # def compute_loss(self, features, tokens, weights, segment_data):
+    #     B, L, P, D = features.shape
+    #     gt_bin = PixDiT_T2I.get_gt_bin(segment_data).to(local_config.device)
+
+    #     merged_mask = self.compute_masks(features, tokens, weights)
+    #     self.save_intermediary_plots(merged_mask, gt_bin, segment_data)
+    #     # merged_mask = torch.clamp(merged_mask, 1.0 - 1e-7)
+    #     bce = torch.nn.functional.binary_cross_entropy_with_logits(merged_mask, gt_bin, reduction="mean")
+    #     intersection = (merged_mask.sigmoid() * gt_bin).sum(dim=-1)
+    #     union = merged_mask.sigmoid().sum(dim=-1) + gt_bin.sum(dim=-1)
+    #     dice = 1.0 - (2.0 * intersection + 1e-7) / (union + 1e-7)
+    #     dice = dice.mean()
+    #     # return dice
+    #     # print("bce", bce, "dice", dice)
+    #     bce_weight = 0.5
+    #     return bce_weight * bce + (1.0 - bce_weight) * dice
 
     @staticmethod
     def plot_segmentation_maps(

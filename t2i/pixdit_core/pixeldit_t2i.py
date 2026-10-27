@@ -437,16 +437,16 @@ class PixDiT_T2I(nn.Module):
         h, w = segment_data["hw"]
 
         gt[gt == 255] = 0
-        gt_binary = torch.nn.functional.one_hot(gt[0].to(torch.int64), num_classes=local_config.label_count+1)
+        gt_binary = torch.nn.functional.one_hot(gt.to(torch.int64), num_classes=local_config.label_count+1)
         gt_binary = F.interpolate(gt_binary.permute(2,0,1).unsqueeze(0).to(torch.bfloat16), (h, w), mode="nearest")[0]
         gt_binary =  einops.rearrange(gt_binary, "b h w -> b (h w)")
-        return torch.stack([gt_binary[lid+1] for lid in label_ids], dim=0)
+        return torch.stack([gt_binary[lid] for lid in label_ids], dim=0)
 
     @staticmethod
     def save_intermediary_plots(merged_mask, gt_bin, segment_data):
         import matplotlib.pyplot as plt
         import os
-
+        gt_ids = segment_data["gt_ids"]
         if os.path.isfile("print"):
             with torch.no_grad():
                 h, w = segment_data["hw"]
@@ -457,7 +457,7 @@ class PixDiT_T2I(nn.Module):
                     fig, axes = plt.subplots(1, 2, figsize=(10, 5))
 
                     axes[0].imshow(pred, cmap="hot")
-                    axes[0].set_title("merged_mask")
+                    axes[0].set_title(f"pred of {gt_ids[ii]}")
                     axes[0].axis("off")
 
                     axes[1].imshow(gt, cmap="hot",)
@@ -467,7 +467,7 @@ class PixDiT_T2I(nn.Module):
                     plt.tight_layout()
                     plt.savefig(f"trash/{len(os.listdir('trash'))}.jpg")
                     plt.close(fig)
-            os.remove("print")
+            # os.remove("print")
 
     @staticmethod
     def min_max(masks, dim):

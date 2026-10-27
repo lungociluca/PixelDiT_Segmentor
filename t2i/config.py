@@ -4,9 +4,9 @@ save_learned_tokens = True
 
 class EvalDataset(Enum):
     VOC12 = "voc_2012_test_sem_seg"
-    ADE20 = "ade20k_sem_seg_{split}".format(split="val" if save_learned_tokens else "val")
+    ADE20 = "ade20k_sem_seg_{split}".format(split="train" if save_learned_tokens else "val")
     # ADE20 = "ade20k_sem_seg_train"
-    COCO = "coco_2017_{split}_stuff_all_sem_seg".format(split="train" if save_learned_tokens else "test")
+    COCO = "coco_2017_{split}_stuff_all_sem_seg".format(split="train" if save_learned_tokens else "train")
 
 class SegmentDataKeys(Enum):
     MASK = "mask"
