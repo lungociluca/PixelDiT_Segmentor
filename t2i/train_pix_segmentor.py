@@ -353,6 +353,7 @@ class Pix_Segmentor(torch.nn.Module):
             # save_path = os.path.join("sio_maps", "images", f'{file_id}.mat')
             # sio.savemat(save_path, cam_dict, do_compression=True)
         
+        # TODO: FIX names and rename and commit trash dirs
         if os.path.isfile("print2"):
             seeem = F.interpolate(x[0]["sem_seg"][None, None].to(torch.float64), (h,w), mode="nearest").detach().cpu()[0,0].to(torch.int64)
             seeem[seeem == 255] = 0

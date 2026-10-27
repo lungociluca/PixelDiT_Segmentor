@@ -1,12 +1,24 @@
 import matplotlib.pyplot as plt
 import sys
 
-with open("loss_logs.txt") as f:
-    content = f.read()
+
+def read_loss_values(filename, start, end):
+    with open(filename) as f:
+        lines = f.read().splitlines()[start:end]
+    return [float(x) for x in lines if x.strip()]
+
 
 start = int(sys.argv[1])
-loss_values = [float(x) for x in content.split("\n")[start:-1]]
+end = int(sys.argv[2])
 
-plt.scatter(list(range(len(loss_values))), loss_values)
+prev_loss_values = read_loss_values("prev_loss_logs.txt", start, end)
+loss_values = read_loss_values("loss_logs.txt", start, end)
+
+plt.scatter(range(len(prev_loss_values)), prev_loss_values, label="Previous loss")
+plt.scatter(range(len(loss_values)), loss_values, label="Current loss")
+
+plt.xlabel("Step")
+plt.ylabel("Loss")
+plt.legend()
 plt.savefig("loss.png")
 plt.close()
