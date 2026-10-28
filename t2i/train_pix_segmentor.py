@@ -313,10 +313,10 @@ class Pix_Segmentor(torch.nn.Module):
     def forward_no_grad(self, x):
         # image_tensor = x[0]["image"].float().to(local_config.device) / 255.
         # image_tensor = (image_tensor * 2) - 1
-        # TODO: figure out how to use the providex tensor, get rid of reading from disk
-        image_tensor = Image.open(f"{x[0]['file_name']}").convert("RGB")
-        image_tensor = torch.from_numpy(np.array(image_tensor)).to(torch.bfloat16).to(local_config.device).permute(2, 0, 1) / 255
-        image_tensor = (image_tensor * 2) - 1
+        # image_tensor = Image.open(f"{x[0]['file_name']}").convert("RGB")
+        # image_tensor = torch.from_numpy(np.array(image_tensor)).to(torch.bfloat16).to(local_config.device).permute(2, 0, 1) / 255
+        # image_tensor = (image_tensor * 2) - 1
+        image_tensor = x[0]["image"].to(local_config.device, dtype=torch.bfloat16) / 127.5 - 1
         original_shape = image_tensor.shape[-2:]
 
         h, w = x[0]["height"], x[0]["width"]
@@ -346,7 +346,7 @@ class Pix_Segmentor(torch.nn.Module):
         # pad image if crops were used
         if local_config.crop_size is not None:
             prediction = Pix_Segmentor.pad_prediction(prediction, original_shape)
-        prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
+        # prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
         # TODO
         predictions_all = torch.zeros(172 if "coco" in local_config.eval_dataset.value else len(self.labels) + 1, h, w).to(prediction.device)
         

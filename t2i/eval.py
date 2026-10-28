@@ -7,6 +7,7 @@ This script is a simplified version of the training script in detectron2/tools.
 from collections import OrderedDict
 import logging
 import os
+import copy
 import shutil
 
 import math
@@ -23,6 +24,7 @@ from detectron2.engine import DefaultTrainer, default_argument_parser, default_s
 from detectron2.evaluation import CityscapesInstanceEvaluator, CityscapesSemSegEvaluator, \
     SemSegEvaluator, COCOEvaluator, COCOPanopticEvaluator, DatasetEvaluators, verify_results, \
     PascalVOCDetectionEvaluator
+import detectron2.data.detection_utils as utils
 
 from detectron2.utils.logger import setup_logger
 from detectron2.data import build_detection_test_loader
@@ -50,7 +52,51 @@ if local_config.use_learned_tokens:
     from train_pix_segmentor import Pix_Segmentor
 else:
     from train_pix_segmentor import Pix_Segmentor
-    
+
+
+class FixedCropTestMapper:
+    def __init__(self, cfg, dataset_name, crop_h, crop_w, center=True):
+        self.crop_h, self.crop_w = crop_h, crop_w
+        self.center = center
+        self.img_format = cfg.INPUT.FORMAT
+        self.ignore_label = MetadataCatalog.get(dataset_name).ignore_label
+
+    def _offsets(self, h, w):
+        if self.center:
+            y0 = max((h - self.crop_h) // 2, 0)
+            x0 = max((w - self.crop_w) // 2, 0)
+        else:
+            y0 = np.random.randint(0, max(h - self.crop_h, 0) + 1)
+            x0 = np.random.randint(0, max(w - self.crop_w, 0) + 1)
+        return x0, y0
+
+    def __call__(self, dataset_dict):
+        dataset_dict = copy.deepcopy(dataset_dict)
+
+        image = utils.read_image(dataset_dict["file_name"], format=self.img_format)
+        sem_seg = utils.read_image(dataset_dict["sem_seg_file_name"])
+        if sem_seg.ndim == 3:
+            sem_seg = sem_seg[:, :, 0]
+        sem_seg = sem_seg.astype("long")
+
+        h, w = image.shape[:2]
+        pad_h, pad_w = max(self.crop_h - h, 0), max(self.crop_w - w, 0)
+        if pad_h or pad_w:
+            image = np.pad(image, ((0, pad_h), (0, pad_w), (0, 0)), constant_values=0)
+            sem_seg = np.pad(sem_seg, ((0, pad_h), (0, pad_w)),
+                             constant_values=self.ignore_label)
+
+        x0, y0 = self._offsets(*image.shape[:2])
+        image = image[y0:y0 + self.crop_h, x0:x0 + self.crop_w]
+        sem_seg = sem_seg[y0:y0 + self.crop_h, x0:x0 + self.crop_w]
+
+        dataset_dict["image"] = torch.as_tensor(
+            np.ascontiguousarray(image.transpose(2, 0, 1)))
+        dataset_dict["sem_seg"] = torch.as_tensor(sem_seg)       # cropped GT, carried along
+        dataset_dict["height"] = self.crop_h                     # output size the model resizes to
+        dataset_dict["width"] = self.crop_w
+        return dataset_dict
+
 class VOCbEvaluator(SemSegEvaluator):
     """
     Evaluate semantic segmentation metrics.
@@ -69,8 +115,11 @@ class VOCbEvaluator(SemSegEvaluator):
             output = output["sem_seg"].argmax(dim=0).to(self._cpu_device)
             pred = np.array(output, dtype=int)
             pred[pred >= 20] = 20
-            with PathManager.open(self.input_file_to_gt_file[input["file_name"]], "rb") as f:
-                gt = np.array(Image.open(f), dtype=int)
+            if "sem_seg" in input:
+                gt = input["sem_seg"].numpy().astype(int)
+            else:
+                with PathManager.open(self.input_file_to_gt_file[input["file_name"]], "rb") as f:
+                    gt = np.array(Image.open(f), dtype=int)
 
             gt[gt == self._ignore_label] = self._num_classes
 
@@ -210,6 +259,16 @@ class CustomTrainer(Trainer):
             drop_last=local_config.save_learned_tokens
         )
         return trimmed_loader
+    
+    @classmethod
+    def build_test_loader(cls, cfg, dataset_name):
+        mapper = FixedCropTestMapper(
+            cfg, dataset_name,
+            crop_h=local_config.crop_h,   # add these two to config.py
+            crop_w=local_config.crop_w,
+            center=True,
+        )
+        return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
 
     @classmethod
     def test(cls, cfg, model, evaluators=None):
