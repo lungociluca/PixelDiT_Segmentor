@@ -347,6 +347,7 @@ def inference_on_dataset(
                     # ----------------------------------------------
 
                     losses = []
+                    losses_dice = []
 
                     for output in outputs:
 
@@ -358,6 +359,7 @@ def inference_on_dataset(
                             )
 
                         loss_value = output[loss_key]
+                        loss_dice_value = output["loss_dice"]
 
                         if not torch.is_tensor(loss_value):
                             raise TypeError(
@@ -372,6 +374,7 @@ def inference_on_dataset(
                             )
 
                         losses.append(loss_value)
+                        losses_dice.append(loss_dice_value)
 
                     if not losses:
                         raise ValueError(
@@ -382,6 +385,9 @@ def inference_on_dataset(
                     # Sum losses from all samples/outputs.
                     loss = torch.stack(
                         [x.float() for x in losses]
+                    ).sum()
+                    loss_dice = torch.stack(
+                        [x.float() for x in losses_dice]
                     ).sum()
 
                     # ----------------------------------------------
@@ -414,7 +420,7 @@ def inference_on_dataset(
 
                         continue
 
-                    accumulated_loss += loss.detach().item()
+                    accumulated_loss += loss_dice.detach().item()
 
                     # ----------------------------------------------
                     # Gradient accumulation
@@ -479,7 +485,7 @@ def inference_on_dataset(
                     )
 
                     if should_step:
-                        print("loss", round(accumulated_loss, 4))
+                        print("loss", round(accumulated_loss / local_config.grad_accumulation, 4))
                         callback(
                             "before_optimizer_step",
                             optimizer_step=optimizer_step,
@@ -648,7 +654,7 @@ def inference_on_dataset(
                         if not optimizer_step_was_skipped:
                             optimizer_step += 1
 
-                        loss_logs.write(f"{accumulated_loss}\n")
+                        loss_logs.write(f"{accumulated_loss / local_config.grad_accumulation}\n")
 
                         # --------------------------------------------
                         # Clear gradients

@@ -217,6 +217,10 @@ class Pix_Segmentor(torch.nn.Module):
     
     @staticmethod
     def select_labels(current_labels):
+        if len(current_labels) <= local_config.select_labels_count:
+            return current_labels
+        else:
+            return current_labels[:local_config.select_labels_count]
         try:
             # will break if sample size < label size
             return random.sample(current_labels, local_config.select_labels_count)
@@ -286,7 +290,7 @@ class Pix_Segmentor(torch.nn.Module):
         self.run_diffusion_model(image_tensor, prompts, target_labels, segment_data)
         assert segment_data["mask"][local_config.target_layer].shape[0] == min(local_config.select_labels_count, len(prompts))
         prediction = segment_data["mask"][local_config.target_layer]
-        return prediction, segment_data.get("loss_final")
+        return prediction, segment_data.get("loss_final"), segment_data.get("loss_dice")
 
     def single_batch(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
         return self.call_model(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
@@ -294,13 +298,16 @@ class Pix_Segmentor(torch.nn.Module):
     def single_class(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
         all_predictions = []
         image_loss = []
+        dice_losses = []
         for gt_id, current_label, current_target in zip(gt_ids, label_indexes, target_labels):
-            prediction, loss = self.call_model(file_id, image_tensor, [current_label], [current_target], [gt_id], original_shape, gt)
+            prediction, loss, loss_dice = self.call_model(file_id, image_tensor, [current_label], [current_target], [gt_id], original_shape, gt)
             all_predictions.append(prediction)
             image_loss.append(loss)
+            dice_losses.append(loss_dice)
         with torch.enable_grad():
             final_loss = torch.stack(image_loss).sum()
-        return torch.cat(all_predictions, dim=0), final_loss
+        final_loss_dice = torch.stack(dice_losses).mean()
+        return torch.cat(all_predictions, dim=0), final_loss, final_loss_dice
 
     @torch.no_grad()
     def forward_no_grad(self, x):
@@ -333,7 +340,7 @@ class Pix_Segmentor(torch.nn.Module):
             print(gt.unique())
             print(x[0]["sem_seg"].unique())
             raise(e)
-        prediction, loss = self.single_batch(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt) if False and local_config.save_learned_tokens else \
+        prediction, loss, loss_dice = self.single_batch(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt) if False and local_config.save_learned_tokens else \
             self.single_class(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
 
         # pad image if crops were used
@@ -378,7 +385,7 @@ class Pix_Segmentor(torch.nn.Module):
                 plt.close(fig)
                 # current_pred = prediction[i].to(torch.float32)
                 # cam_dict[str(lid)] = (current_pred * 255).cpu().numpy()
-        return [{"sem_seg": predictions_all, "learnable_token_loss": loss}]
+        return [{"sem_seg": predictions_all, "learnable_token_loss": loss, "loss_dice": loss_dice}]
     
     def forward(self, x):
         return self.forward_no_grad(x)

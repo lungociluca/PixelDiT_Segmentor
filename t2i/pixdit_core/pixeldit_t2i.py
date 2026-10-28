@@ -510,6 +510,7 @@ class PixDiT_T2I(nn.Module):
         union = merged_mask.sigmoid().sum(dim=-1) + gt_bin.sum(dim=-1)
         dice = 1.0 - (2.0 * intersection + 1e-7) / (union + 1e-7)
         dice = dice.mean()
+        segment_data["loss_dice"] = dice.clone().detach()
         # return dice
         # print("bce", bce, "dice", dice)
         bce_weight = 0.5
@@ -598,7 +599,7 @@ class PixDiT_T2I(nn.Module):
                 tokens = vision_tokens[:,:,:local_config.no_vision_learnable_tokens,:]
                 features = vision_tokens[:,:,local_config.no_vision_learnable_tokens:,:]
                 # weights = my_norm(vision_match) @ my_norm(language_match).permute(0,1,3,2)
-                loss = self.compute_loss(features, tokens, vision_match, segment_data) + self.regularization_loss(tokens)
+                loss = self.compute_loss(features, tokens, vision_match, segment_data) #+ self.regularization_loss(tokens)
                 segment_data["loss_final"] = loss # TODO
                 if local_config.use_learned_tokens:
                     masks = self.compute_masks(features, tokens, vision_match).sigmoid()
