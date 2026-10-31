@@ -25,7 +25,7 @@ from diffusion.utils.logger import get_root_logger
 from diffusion import DPMS
 from diffusion.model.builder import MODELS
 from pixdit_core.pixeldit_t2i import PixDiT_T2I
-
+import pixdit_core.compute_masks as compute_masks_utils
 
 @dataclass
 class PixelDiTInference(PixDiTConfig):
@@ -143,71 +143,31 @@ class Pix_Segmentor(torch.nn.Module):
         del self.tokenizer
         del self.text_encoder
 
+        self.learnable_token_norm_weights = torch.nn.LayerNorm(local_config.no_vision_learnable_tokens)
+        if local_config.use_learned_tokens:
+            self.learnable_token_norm_weights.load_state_dict(torch.load("norm_weights.pt", weights_only=True))
+        self.learnable_token_norm_weights.to(local_config.device)
+
+        if local_config.use_learned_tokens:
+            self.learnable_token_language_weights = torch.load("learnable_token_language_weights.pt", weights_only=False)
+            self.learnable_token_language_no_object = torch.load("learnable_token_language_no_object.pt", weights_only=False)
+        else:
+            self.learnable_token_language_weights = torch.nn.Embedding(300, 1).to(local_config.device)
+            self.learnable_token_language_no_object = torch.nn.Embedding(1, 2304).to(local_config.device)
+
     def precompute_prompts(self):
         precomputed_embs = {}
-        prompts = [local_config.prompt_format.format(target=current_target) for current_target in self.labels]
+        prompts = [local_config.default_prompt + " " + local_config.subprompt.format(target=current_target) for current_target in self.labels]
+        # default prompt for model inference
+        prompts.append(
+            local_config.default_prompt
+        )
         return self.embed_condition(prompts)
 
     @staticmethod
     def img_id_from_path(x):
         return x[0]["file_name"].split("/")[-1].replace(".jpg", "")
 
-    @staticmethod
-    def resize_maps(maps, new_shape):
-        return F.interpolate(maps[:,None,:,:], new_shape, mode="bilinear", align_corners=False).squeeze(1)
-
-    @staticmethod
-    def resize_input(images, new_shape):
-        if local_config.crop_size is None:
-            return torch.nn.functional.interpolate(
-                images[None,:,:,:],
-                size=(512, 512),
-                mode="bilinear",
-                align_corners=False
-            )
-        else:
-            H, W = images.shape[-2:]
-            crop_h = (H // 16) * 16
-            crop_w = (W // 16) * 16
-            top = (H - crop_h) // 2
-            left = (W - crop_w) // 2
-            return images[None, :, top:top + crop_h, left:left + crop_w]
-
-    @staticmethod
-    def pad_prediction(prediction, new_shape):
-        height, width = new_shape
-        target_ratio = width / height
-        h, w = prediction.shape[-2:]
-
-        current_ratio = w / h
-
-        if current_ratio < target_ratio:
-            # Need to increase width
-            new_w = round(h * target_ratio)
-            pad_w = new_w - w
-
-            padding = (
-                pad_w // 2,
-                pad_w - pad_w // 2,
-                0,
-                0,
-            )
-
-        elif current_ratio > target_ratio:
-            # Need to increase height
-            new_h = round(w / target_ratio)
-            pad_h = new_h - h
-
-            padding = (
-                0,
-                0,
-                pad_h // 2,
-                pad_h - pad_h // 2,
-            )
-        else:
-            # Already has the correct aspect ratio
-            return prediction
-        return torch.nn.functional.pad(prediction, padding, mode="constant", value=0)
 
     def add_extra_labels(self, gt_labels):
         extra_labels_count = local_config.extra_labels_count
@@ -217,6 +177,7 @@ class Pix_Segmentor(torch.nn.Module):
     
     @staticmethod
     def select_labels(current_labels):
+        # TODO
         if len(current_labels) <= local_config.select_labels_count:
             return current_labels
         else:
@@ -227,13 +188,6 @@ class Pix_Segmentor(torch.nn.Module):
         except ValueError:
             return current_labels 
 
-    # get GT for output shapes and input prompts
-    def get_gt(self, x):
-        gt_file_path = x[0]['file_name'].replace(local_config.current_ds_paths["img_dir"], local_config.current_ds_paths["gt_dir"]) \
-            .replace(".jpg", local_config.current_ds_paths["extention"])
-        mask = Image.open(gt_file_path)
-        mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
-        return mask_tensor
 
     def embed_condition(self, prompts):
         caption_token = self.tokenizer(
@@ -248,13 +202,11 @@ class Pix_Segmentor(torch.nn.Module):
         emb_masks = caption_token.attention_mask[:, select_index]
         return caption_embs, emb_masks, tokens_count
     
-    def run_diffusion_model(self, image, prompts, target_labels, segment_data):
+    def run_diffusion_model(self, image, target_labels, segment_data):
         # TODO
-        indices = [self.labels.index(t) for t in target_labels]
-        emb = torch.stack([self.emb[i] for i in indices], dim=0)
-        emb_mask = torch.stack([self.emb_mask[i] for i in indices], dim=0)
-        tokens_count = [self.tokens_count[i] for i in indices]
-        # emb, emb_mask, tokens_count = self.embed_condition(prompts)
+        emb = self.emb[-1].unsqueeze(0)
+        emb_mask = self.emb_mask[-1].unsqueeze(0)
+        tokens_count = self.tokens_count[-1]
         model_kwargs = dict(data_info={"img_hw": image.shape[-2], "aspect_ratio": 1}, mask=emb_mask)
         segment_data["tokens_count"] = tokens_count
 
@@ -271,9 +223,8 @@ class Pix_Segmentor(torch.nn.Module):
         # del self.tokenizer
         # del self.text_encoder
 
-        image = Pix_Segmentor.resize_input(image, (local_config.image_size,local_config.image_size))
         samples = dpm_solver.segment(
-            image.repeat(len(target_labels),1,1,1),
+            image.unsqueeze(0),
             segment_data
         )
 
@@ -284,30 +235,32 @@ class Pix_Segmentor(torch.nn.Module):
         #     save_image(sample, save_path, nrow=1, normalize=True, value_range=(-1, 1))
 
     def call_model(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
-        prompts = [local_config.prompt_format.format(target=current_target) for current_target in target_labels]
         segment_data = {"labels": target_labels, "img_id": file_id, "label_ids": label_indexes, \
             "gt_ids": gt_ids, "targets": target_labels, "gt": gt}
-        self.run_diffusion_model(image_tensor, prompts, target_labels, segment_data)
-        assert segment_data["mask"][local_config.target_layer].shape[0] == min(local_config.select_labels_count, len(prompts))
-        prediction = segment_data["mask"][local_config.target_layer]
-        return prediction, segment_data.get("loss_final"), segment_data.get("loss_dice")
+        self.run_diffusion_model(image_tensor, target_labels, segment_data)
+        
+        visual_features = segment_data["all_vision_features"]
+        vl_features = segment_data["vl_learned"]
+        learned_vision = visual_features[:,:,:local_config.no_vision_learnable_tokens,:]
+        dense_vision = visual_features[:,:,local_config.no_vision_learnable_tokens:,:]
+        h, w = segment_data["hw"]
+        print("EMBS", self.emb.shape)
+        prediction = None
+        loss = None
+        dice_loss = None
+        if local_config.save_learned_tokens:
+            loss, dice_loss = compute_masks_utils.compute_loss(dense_vision, learned_vision, vl_features, self.emb, self.learnable_token_norm_weights, self.learnable_token_language_weights.weight, self.learnable_token_language_no_object.weight, gt, label_indexes, h, w)
+        else:
+            prediction = compute_masks_utils.compute_masks(dense_vision, learned_vision, vl_features, self.emb, self.learnable_token_norm_weights,  self.learnable_token_language_weights.weight, self.learnable_token_language_no_object.weight,label_indexes)
+
+        return prediction, loss, dice_loss
 
     def single_batch(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
         return self.call_model(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
 
     def single_class(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
-        all_predictions = []
-        image_loss = []
-        dice_losses = []
-        for gt_id, current_label, current_target in zip(gt_ids, label_indexes, target_labels):
-            prediction, loss, loss_dice = self.call_model(file_id, image_tensor, [current_label], [current_target], [gt_id], original_shape, gt)
-            all_predictions.append(prediction)
-            image_loss.append(loss)
-            dice_losses.append(loss_dice)
-        with torch.enable_grad():
-            final_loss = torch.stack(image_loss).sum()
-        final_loss_dice = torch.stack(dice_losses).mean()
-        return torch.cat(all_predictions, dim=0), final_loss, final_loss_dice
+        prediction, loss, loss_dice = self.call_model(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
+        return prediction, loss, loss_dice
 
     @torch.no_grad()
     def forward_no_grad(self, x):
@@ -343,10 +296,6 @@ class Pix_Segmentor(torch.nn.Module):
         prediction, loss, loss_dice = self.single_batch(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt) if False and local_config.save_learned_tokens else \
             self.single_class(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
 
-        # pad image if crops were used
-        if local_config.crop_size is not None:
-            prediction = Pix_Segmentor.pad_prediction(prediction, original_shape)
-        # prediction = Pix_Segmentor.resize_maps(prediction, (h,w))
         # TODO
         predictions_all = torch.zeros(172 if "coco" in local_config.eval_dataset.value else len(self.labels) + 1, h, w).to(prediction.device)
         
@@ -386,38 +335,9 @@ class Pix_Segmentor(torch.nn.Module):
                 # current_pred = prediction[i].to(torch.float32)
                 # cam_dict[str(lid)] = (current_pred * 255).cpu().numpy()
         return [{"sem_seg": predictions_all, "learnable_token_loss": loss, "loss_dice": loss_dice}]
-    
+
     def forward(self, x):
         return self.forward_no_grad(x)
-
-    # @staticmethod
-    # def get_gt_bin(segment_data):
-    #     gt = segment_data["gt"]
-    #     label_ids = segment_data["label_ids"]
-    #     h, w = segment_data["hw"]
-
-    #     gt[gt == 255] = 0
-    #     gt_binary = torch.nn.functional.one_hot(gt[0].to(torch.int64), num_classes=local_config.label_count+1)
-    #     gt_binary = F.interpolate(gt_binary.permute(2,0,1).unsqueeze(0).to(torch.bfloat16), (h, w), mode="nearest")[0]
-    #     gt_binary =  einops.rearrange(gt_binary, "b h w -> b (h w)")
-    #     return torch.stack([gt_binary[lid+1] for lid in label_ids], dim=0)
-
-    # def compute_loss(self, features, tokens, weights, segment_data):
-    #     B, L, P, D = features.shape
-    #     gt_bin = PixDiT_T2I.get_gt_bin(segment_data).to(local_config.device)
-
-    #     merged_mask = self.compute_masks(features, tokens, weights)
-    #     self.save_intermediary_plots(merged_mask, gt_bin, segment_data)
-    #     # merged_mask = torch.clamp(merged_mask, 1.0 - 1e-7)
-    #     bce = torch.nn.functional.binary_cross_entropy_with_logits(merged_mask, gt_bin, reduction="mean")
-    #     intersection = (merged_mask.sigmoid() * gt_bin).sum(dim=-1)
-    #     union = merged_mask.sigmoid().sum(dim=-1) + gt_bin.sum(dim=-1)
-    #     dice = 1.0 - (2.0 * intersection + 1e-7) / (union + 1e-7)
-    #     dice = dice.mean()
-    #     # return dice
-    #     # print("bce", bce, "dice", dice)
-    #     bce_weight = 0.5
-    #     return bce_weight * bce + (1.0 - bce_weight) * dice
 
     @staticmethod
     def plot_segmentation_maps(
@@ -482,3 +402,10 @@ class Pix_Segmentor(torch.nn.Module):
         fig.tight_layout()
         fig.savefig(save_path, dpi=200, bbox_inches="tight")
         plt.close(fig)
+
+    def __del__(self):
+        if local_config.save_learned_tokens:
+            torch.save(self.learnable_token_norm_weights.state_dict(), "norm_weights.pt")
+            torch.save(self.learnable_token_language_weights, "learnable_token_language_weights.pt")
+            torch.save(self.learnable_token_language_no_object, "learnable_token_language_no_object.pt")
+            # torch.save(self.learnable_token_language_weights.state_dict(), f"learnable_token_language_weights.pt")

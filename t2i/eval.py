@@ -47,11 +47,7 @@ import config as local_config
 from detectron2.data import MetadataCatalog
 from register_pascal_20 import register_all_pascal_voc
 from register_coco import register_all_coco_stuff_10k
-
-if local_config.use_learned_tokens:
-    from train_pix_segmentor import Pix_Segmentor
-else:
-    from train_pix_segmentor import Pix_Segmentor
+from train_pix_segmentor import Pix_Segmentor
 
 
 class FixedCropTestMapper:
